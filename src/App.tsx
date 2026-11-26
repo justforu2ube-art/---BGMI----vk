@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { Volume2, VolumeX } from 'lucide-react';
+import { HelpCircle, Volume2, VolumeX } from 'lucide-react';
 import {
   CAMERA_PRESETS,
   CameraPresetKey,
   CharacterStudioEngine,
+  DEFAULT_LIGHTING_PRESET,
   LIGHTING_PRESETS,
   LightingPresetKey,
   StudioMode,
@@ -12,6 +13,11 @@ import { ANIMATION_NAMES, AnimationName } from './character/animations';
 import { FACIAL_MORPH_NAMES, FacialMorphName } from './character/headSculpt';
 import { BuiltCharacter } from './character/characterBuilder';
 import { tacticalAudio } from './studio/audio';
+import {
+  setHideWelcomeGuidePreference,
+  shouldShowWelcomeGuide,
+} from './studio/welcomeGuidePrefs';
+import { WelcomeGuideModal } from './components/WelcomeGuideModal';
 
 type StudioSection = 'inspect' | 'combat' | 'animations' | 'camera' | 'morphs' | 'display';
 
@@ -70,10 +76,16 @@ export default function App() {
   const [uiHidden, setUiHidden] = useState(false);
   const [activeAnim, setActiveAnim] = useState<AnimationName>('Idle_Natural');
   const [activeCam, setActiveCam] = useState<CameraPresetKey>('full_body');
-  const [activeLighting, setActiveLighting] = useState<LightingPresetKey>('studio_soft');
+  const [activeLighting, setActiveLighting] = useState<LightingPresetKey>(DEFAULT_LIGHTING_PRESET);
   const [stats, setStats] = useState<BuiltCharacter['stats'] | null>(null);
   const [isExporting, setIsExporting] = useState(false);
   const [isAiming, setIsAiming] = useState(false);
+
+  // Welcome controls guide modal state (persisted via localStorage)
+  const [guideOpen, setGuideOpen] = useState<boolean>(() => shouldShowWelcomeGuide());
+  const [dontShowNextTime, setDontShowNextTime] = useState<boolean>(() => !shouldShowWelcomeGuide());
+  const guideOpenRef = useRef(guideOpen);
+  guideOpenRef.current = guideOpen;
 
   // Display options
   const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
@@ -112,6 +124,7 @@ export default function App() {
 
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (guideOpenRef.current) return;
       if (e.key === 'h' || e.key === 'H') {
         setUiHidden((prev) => !prev);
       }
@@ -212,6 +225,20 @@ export default function App() {
     tacticalAudio.muted = next;
   };
 
+  const handleDontShowGuideChange = (checked: boolean) => {
+    setDontShowNextTime(checked);
+    setHideWelcomeGuidePreference(checked);
+  };
+
+  const handleCloseGuide = () => {
+    setHideWelcomeGuidePreference(dontShowNextTime);
+    setGuideOpen(false);
+  };
+
+  const handleOpenGuide = () => {
+    setGuideOpen(true);
+  };
+
   const activeLightingObj = LIGHTING_PRESETS.find((p) => p.id === activeLighting);
 
   const renderLightingControls = () => (
@@ -306,10 +333,20 @@ export default function App() {
             </span>
           </div>
 
-          <div className="flex items-center gap-5 shrink-0">
+          <div className="flex items-center gap-3.5 sm:gap-4 shrink-0">
             <span className="hidden sm:inline font-mono-tabular text-[0.75rem] tracking-[0.05em] text-[#1a1a1a] whitespace-nowrap">
               OPERATOR_ALPHA_GEN3
             </span>
+            <button
+              type="button"
+              onClick={handleOpenGuide}
+              aria-label="Open controls guide"
+              title="Controls Guide"
+              data-testid="open-guide-btn"
+              className="w-8 h-8 rounded-full border border-[#1a1a1a]/[0.16] bg-white hover:bg-[#1a1a1a] hover:text-white text-[#1a1a1a] flex items-center justify-center transition-colors duration-150 cursor-pointer shrink-0"
+            >
+              <HelpCircle className="w-4 h-4" aria-hidden="true" />
+            </button>
             <button
               type="button"
               onClick={handleExportGLB}
@@ -692,6 +729,13 @@ export default function App() {
           </button>
         </footer>
       )}
+      {/* Startup & Reopenable Quick-Start Controls Guide */}
+      <WelcomeGuideModal
+        open={guideOpen}
+        dontShowNextTime={dontShowNextTime}
+        onDontShowChange={handleDontShowGuideChange}
+        onClose={handleCloseGuide}
+      />
     </div>
   );
 }

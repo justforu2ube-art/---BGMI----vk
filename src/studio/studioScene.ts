@@ -15,13 +15,14 @@ import {
 } from '../character/controllerMath';
 import { tacticalAudio } from './audio';
 import {
+  DEFAULT_LIGHTING_PRESET,
   getLightingPreset,
   LIGHTING_PRESETS,
   LightingPresetKey,
   LightingPresetSpec,
 } from './lightingPresets';
 
-export { LIGHTING_PRESETS };
+export { DEFAULT_LIGHTING_PRESET, LIGHTING_PRESETS };
 export type { LightingPresetKey, LightingPresetSpec };
 
 export type CameraPresetKey =
@@ -208,7 +209,7 @@ export class CharacterStudioEngine {
   private backdropTex: THREE.CanvasTexture;
   private shadowTex: THREE.CanvasTexture;
   private envRT: THREE.WebGLRenderTarget;
-  private activeLighting: LightingPresetKey = 'studio_soft';
+  private activeLighting: LightingPresetKey = DEFAULT_LIGHTING_PRESET;
 
   // Reloaded GLB proof overlay (used only during automated GLB round-trip verification)
   private reloadedGroup: THREE.Group | null = null;
@@ -256,6 +257,8 @@ export class CharacterStudioEngine {
     this.callbacks = callbacks;
     this.isSoftwareGl = detectSoftwareWebGL();
 
+    const defaultLighting = getLightingPreset(this.activeLighting);
+
     // 1. Renderer — Three.js r187 modern PBR pipeline (NO deprecated APIs!)
     this.renderer = new THREE.WebGLRenderer({
       antialias: !this.isSoftwareGl,
@@ -264,7 +267,7 @@ export class CharacterStudioEngine {
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.AgXToneMapping;
-    this.renderer.toneMappingExposure = 1.08;
+    this.renderer.toneMappingExposure = defaultLighting.exposure;
     this.renderer.setPixelRatio(
       this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2)
     );
@@ -275,18 +278,17 @@ export class CharacterStudioEngine {
 
     // 2. Scene + Procedural Studio HDR Environment via PMREMGenerator
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color('#181f29');
+    this.scene.background = new THREE.Color(defaultLighting.bgColor);
 
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     const roomEnv = new RoomEnvironment();
     this.envRT = pmrem.fromScene(roomEnv, 0.04);
     this.scene.environment = this.envRT.texture;
-    this.scene.environmentIntensity = 0.46;
+    this.scene.environmentIntensity = defaultLighting.environmentIntensity;
     roomEnv.dispose();
     pmrem.dispose();
 
     // Smooth gradient studio cyclorama dome (ZERO environment clutter props!)
-    const defaultLighting = getLightingPreset('studio_soft');
     const backdrop = createStudioBackdropTexture(defaultLighting.backdropStops);
     this.backdropCanvas = backdrop.canvas;
     this.backdropTex = backdrop.tex;

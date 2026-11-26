@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  DEFAULT_LIGHTING_PRESET,
   getLightingPreset,
   LIGHTING_PRESET_KEYS,
   LIGHTING_PRESETS,
 } from './lightingPresets';
 
-test('lightingPresets defines all four requested PBR environment setups', () => {
+test('lightingPresets defines all four requested PBR environment setups and defaults to Harsh Sunlight', () => {
+  assert.equal(DEFAULT_LIGHTING_PRESET, 'harsh_sunlight');
   assert.equal(LIGHTING_PRESETS.length, 4);
   assert.deepEqual(
     LIGHTING_PRESETS.map((p) => p.label),

@@ -48,6 +48,8 @@ export const LIGHTING_PRESET_KEYS: readonly LightingPresetKey[] = [
   'indoor_warehouse',
 ] as const;
 
+export const DEFAULT_LIGHTING_PRESET: LightingPresetKey = 'harsh_sunlight';
+
 export const LIGHTING_PRESETS: readonly LightingPresetSpec[] = [
   {
     id: 'studio_soft',
