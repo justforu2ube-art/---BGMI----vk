@@ -1,0 +1,77 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #f8f7f4;
+  --surface: #ffffff;
+  --ink: #1a1a1a;
+  --accent: #ff4d00;
+  --ink-faint: rgba(26, 26, 26, 0.08);
+  --ink-muted: rgba(26, 26, 26, 0.48);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    font-family: 'Geist', system-ui, -apple-system, sans-serif;
+    background-color: var(--bg);
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::selection {
+    background: var(--accent);
+    color: #ffffff;
+  }
+}
+
+.font-editorial {
+  font-family: 'Cormorant Garamond', Georgia, serif;
+}
+
+.font-mono-tabular {
+  font-family: 'Geist Mono', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.studio-viewport-grid {
+  background-color: #191e26;
+  background-image: radial-gradient(rgba(26, 26, 26, 0.14) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+input[type='range'].studio-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(26, 26, 26, 0.14);
+  outline: none;
+}
+
+input[type='range'].studio-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #ff4d00;
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 0 1px rgba(26, 26, 26, 0.18);
+  cursor: pointer;
+}
+
+input[type='range'].studio-slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #ff4d00;
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 0 1px rgba(26, 26, 26, 0.18);
+  cursor: pointer;
+}

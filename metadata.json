@@ -1,0 +1,6 @@
+{
+  "name": "Vanguard Tactical Character Studio",
+  "description": "AAA photorealistic 3D tactical hero character studio with procedural 2K PBR textures, full humanoid finger-rigged skeleton, facial morph targets, 10 biomechanical animations, live third-person combat controller, and Unreal Engine 5 .GLB exporter.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
