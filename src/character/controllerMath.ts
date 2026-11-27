@@ -78,7 +78,8 @@ export function stepCombatController(
   input: InputState,
   cameraYaw: number,
   cameraPitch: number,
-  dt: number
+  dt: number,
+  obstacleResolver?: (x: number, z: number) => { x: number; z: number }
 ): StepResult {
   const clampedDt = Math.min(Math.max(dt, 0.0001), 0.05);
   let firedThisStep = false;
@@ -163,15 +164,21 @@ export function stepCombatController(
     clampedDt
   );
 
-  // Move character within clean studio turntable arena (radius 5.5m so studio rim lights stay balanced)
+  // Move character within military training ground clearing with clean obstacle collision
   if (state.speed > 0.02 && dirLen > 1e-5) {
     state.posX += worldDirX * state.speed * clampedDt;
     state.posZ += worldDirZ * state.speed * clampedDt;
-    const dist = Math.hypot(state.posX, state.posZ);
-    const maxRadius = 5.5;
-    if (dist > maxRadius) {
-      state.posX = (state.posX / dist) * maxRadius;
-      state.posZ = (state.posZ / dist) * maxRadius;
+    if (obstacleResolver) {
+      const resolved = obstacleResolver(state.posX, state.posZ);
+      state.posX = resolved.x;
+      state.posZ = resolved.z;
+    } else {
+      const dist = Math.hypot(state.posX, state.posZ);
+      const maxRadius = 7.0;
+      if (dist > maxRadius) {
+        state.posX = (state.posX / dist) * maxRadius;
+        state.posZ = (state.posZ / dist) * maxRadius;
+      }
     }
   }
 

@@ -208,24 +208,24 @@ function buildUpperOutfit(rig: CharacterRig) {
   const stitchParts: THREE.BufferGeometry[] = [];
 
   // --- A. High-Res Draped Tactical Jacket Torso + Closed Solid Upper Trapezius Yoke ---
-  // Notice rings 14..19 step cleanly INWARD across the shoulder deck into the turtleneck so top-down view is 100% SOLID!
+  // Athletic V-taper profile: trimmed mid/upper ribcage & chest depth so silhouette stays lean, never barrel-chested!
   const torsoLevels = [
-    { y: 0.945, rx: 0.170, rz: 0.120, zOff: -0.004, fold: 0.0052, v: 0.0 },
-    { y: 0.978, rx: 0.172, rz: 0.121, zOff: -0.003, fold: 0.0064, v: 0.08 },
-    { y: 1.018, rx: 0.166, rz: 0.119, zOff: -0.001, fold: 0.0058, v: 0.16 },
-    { y: 1.068, rx: 0.162, rz: 0.117, zOff: 0.001, fold: 0.0048, v: 0.25 },
-    { y: 1.125, rx: 0.169, rz: 0.121, zOff: 0.003, fold: 0.0042, v: 0.36 },
-    { y: 1.185, rx: 0.181, rz: 0.128, zOff: 0.005, fold: 0.0038, v: 0.47 },
-    { y: 1.245, rx: 0.196, rz: 0.136, zOff: 0.006, fold: 0.0036, v: 0.58 },
-    { y: 1.305, rx: 0.210, rz: 0.142, zOff: 0.007, fold: 0.0034, v: 0.69 },
-    { y: 1.365, rx: 0.218, rz: 0.145, zOff: 0.007, fold: 0.0036, v: 0.80 },
-    { y: 1.418, rx: 0.218, rz: 0.141, zOff: 0.006, fold: 0.0034, v: 0.89 },
-    { y: 1.462, rx: 0.211, rz: 0.133, zOff: 0.005, fold: 0.0026, v: 0.96 },
-    { y: 1.495, rx: 0.194, rz: 0.123, zOff: 0.004, fold: 0.0018, v: 1.02 },
+    { y: 0.945, rx: 0.163, rz: 0.114, zOff: -0.004, fold: 0.0050, v: 0.0 },
+    { y: 0.978, rx: 0.164, rz: 0.115, zOff: -0.003, fold: 0.0060, v: 0.08 },
+    { y: 1.018, rx: 0.158, rz: 0.112, zOff: -0.001, fold: 0.0055, v: 0.16 },
+    { y: 1.068, rx: 0.154, rz: 0.110, zOff: 0.001, fold: 0.0046, v: 0.25 },
+    { y: 1.125, rx: 0.159, rz: 0.113, zOff: 0.003, fold: 0.0040, v: 0.36 },
+    { y: 1.185, rx: 0.168, rz: 0.119, zOff: 0.005, fold: 0.0036, v: 0.47 },
+    { y: 1.245, rx: 0.180, rz: 0.125, zOff: 0.006, fold: 0.0034, v: 0.58 },
+    { y: 1.305, rx: 0.191, rz: 0.130, zOff: 0.006, fold: 0.0032, v: 0.69 },
+    { y: 1.365, rx: 0.197, rz: 0.132, zOff: 0.006, fold: 0.0034, v: 0.80 },
+    { y: 1.418, rx: 0.197, rz: 0.129, zOff: 0.005, fold: 0.0032, v: 0.89 },
+    { y: 1.462, rx: 0.193, rz: 0.123, zOff: 0.005, fold: 0.0024, v: 0.96 },
+    { y: 1.495, rx: 0.182, rz: 0.116, zOff: 0.004, fold: 0.0016, v: 1.02 },
     // Solid upward-facing trapezius shoulder deck sealing tightly into standing collar & turtleneck!
-    { y: 1.518, rx: 0.168, rz: 0.112, zOff: 0.003, fold: 0.0012, v: 1.08 },
-    { y: 1.530, rx: 0.136, rz: 0.100, zOff: 0.003, fold: 0.0008, v: 1.14 },
-    { y: 1.535, rx: 0.108, rz: 0.092, zOff: 0.003, fold: 0.0004, v: 1.20 },
+    { y: 1.518, rx: 0.160, rz: 0.107, zOff: 0.003, fold: 0.0012, v: 1.08 },
+    { y: 1.530, rx: 0.132, rz: 0.098, zOff: 0.003, fold: 0.0008, v: 1.14 },
+    { y: 1.535, rx: 0.106, rz: 0.091, zOff: 0.003, fold: 0.0004, v: 1.20 },
     { y: 1.529, rx: 0.082, rz: 0.078, zOff: 0.003, fold: 0.0, v: 1.25 },
     { y: 1.508, rx: 0.058, rz: 0.058, zOff: 0.003, fold: 0.0, v: 1.30 },
   ];
@@ -241,7 +241,7 @@ function buildUpperOutfit(rig: CharacterRig) {
       const isDeck = lv.y > 1.505;
       const pec =
         !isDeck && c > 0
-          ? Math.pow(c, 1.5) * 0.011 * (lv.y > 1.21 && lv.y < 1.45 ? 1 : 0.2)
+          ? Math.pow(c, 1.5) * 0.008 * (lv.y > 1.21 && lv.y < 1.45 ? 1 : 0.2)
           : 0;
       const spineGroove = !isDeck && c < -0.65 ? -Math.pow(-c - 0.65, 2) * 0.036 : 0;
 
@@ -376,14 +376,14 @@ function buildUpperOutfit(rig: CharacterRig) {
   }
 
   // --- D. Stitched Fabric Zipper Placket Welt + Chunky Black Zipper + 38 Sculpted Teeth + Slider ---
-  // Proud +4mm over chest center curve so cloth NEVER clips through the zipper teeth!
+  // Proud +4mm over slimmer athletic chest curve so cloth NEVER clips through the zipper teeth!
   const zipTapePts = [
-    new THREE.Vector3(0, 0.950, 0.123),
-    new THREE.Vector3(0, 1.075, 0.126),
-    new THREE.Vector3(0, 1.245, 0.153),
-    new THREE.Vector3(0, 1.375, 0.162),
-    new THREE.Vector3(0, 1.482, 0.140),
-    new THREE.Vector3(0, 1.548, 0.105),
+    new THREE.Vector3(0, 0.950, 0.117),
+    new THREE.Vector3(0, 1.075, 0.119),
+    new THREE.Vector3(0, 1.245, 0.140),
+    new THREE.Vector3(0, 1.375, 0.147),
+    new THREE.Vector3(0, 1.482, 0.130),
+    new THREE.Vector3(0, 1.548, 0.103),
   ];
   const zipCurve = new THREE.CatmullRomCurve3(zipTapePts);
   const zipTape = createSweptStrap(zipTapePts, 0.024, 0.007, 34, false, new THREE.Vector3(1, 0, 0));
@@ -395,12 +395,12 @@ function buildUpperOutfit(rig: CharacterRig) {
 
   // Flanking stitched Cordura fabric placket welt strips terminating neatly at collar V-notch (y=1.542)
   const weltBasePts = [
-    new THREE.Vector3(0, 0.950, 0.121),
-    new THREE.Vector3(0, 1.075, 0.124),
-    new THREE.Vector3(0, 1.245, 0.151),
-    new THREE.Vector3(0, 1.375, 0.160),
-    new THREE.Vector3(0, 1.482, 0.138),
-    new THREE.Vector3(0, 1.540, 0.106),
+    new THREE.Vector3(0, 0.950, 0.115),
+    new THREE.Vector3(0, 1.075, 0.117),
+    new THREE.Vector3(0, 1.245, 0.138),
+    new THREE.Vector3(0, 1.375, 0.145),
+    new THREE.Vector3(0, 1.482, 0.128),
+    new THREE.Vector3(0, 1.540, 0.104),
   ];
   for (const s of [1, -1] as const) {
     const weltPts = weltBasePts.map((p) => new THREE.Vector3(0.017 * s, p.y, p.z));
@@ -457,19 +457,19 @@ function buildUpperOutfit(rig: CharacterRig) {
   // --- E. Convex Torso-Curved Left & Right Chest Webbing Panels + ALL 16 Crisp Proud Gunmetal Grommets ---
   for (const side of ['L', 'R'] as const) {
     const s = side === 'L' ? 1 : -1;
-    const panelX = 0.094 * s;
+    const panelX = 0.086 * s;
     const panelY = 1.404;
-    const panelZ = 0.148;
+    const panelZ = 0.134;
     const rotX = -0.15;
-    const rotY = 0.26 * s;
+    const rotY = 0.27 * s;
     const pDepth = 0.0065;
     const pBevel = 0.0018;
-    // POSITIVE curveRadiusX wraps outer edges BACKWARD around the convex chest ribcage!
-    const curveR = 0.24;
+    // POSITIVE curveRadiusX wraps outer edges BACKWARD around the slimmer convex chest ribcage!
+    const curveR = 0.215;
 
     const panel = createBeveledPanel({
-      width: 0.124,
-      height: 0.064,
+      width: 0.114,
+      height: 0.062,
       depth: pDepth,
       cornerRadius: 0.006,
       bevel: pBevel,
@@ -481,8 +481,8 @@ function buildUpperOutfit(rig: CharacterRig) {
 
     // Subtle stitched border piping following the exact convex curved webbing perimeter
     const borderPts: THREE.Vector3[] = [];
-    const bw = 0.061;
-    const bh = 0.031;
+    const bw = 0.056;
+    const bh = 0.030;
     const perimeter: [number, number][] = [
       [-bw, -bh],
       [0, -bh],
@@ -515,9 +515,9 @@ function buildUpperOutfit(rig: CharacterRig) {
     // 2 horizontal rows x 4 gunmetal circular grommet eyelets (ALL 16 proud & flush on convex panel face!)
     const frontZ = pDepth + pBevel + 0.0022;
     for (let row = 0; row < 2; row++) {
-      const ly = row === 0 ? 0.016 : -0.016;
+      const ly = row === 0 ? 0.0155 : -0.0155;
       for (let col = 0; col < 4; col++) {
-        const lx = -0.0435 + col * 0.029;
+        const lx = -0.0398 + col * 0.0265;
         const ang = lx / curveR;
         const rad = curveR + frontZ;
         const gx = Math.sin(ang) * rad;
@@ -534,16 +534,16 @@ function buildUpperOutfit(rig: CharacterRig) {
   // --- F. Softly Sculpted Pole-Free Pillowed Cloth Pouches, Pleated Bellows Pockets & Stitch Piping ---
   // RIGHT CHEST (-X): 3 softly pillowed narrow vertical magazine pouches with rounded overhanging flaps & snap studs
   for (let i = 0; i < 3; i++) {
-    const px = -0.048 - i * 0.036;
+    const px = -0.044 - i * 0.033;
     const py = 1.255;
-    const pz = 0.148 - i * 0.007;
-    const yaw = -0.13 - i * 0.14;
+    const pz = 0.135 - i * 0.007;
+    const yaw = -0.14 - i * 0.14;
 
     const body = createSoftClothPouch({
-      width: 0.031,
+      width: 0.029,
       height: 0.118,
-      depth: 0.024,
-      pillow: 0.0055,
+      depth: 0.023,
+      pillow: 0.0052,
       cornerRadius: 0.007,
       wrinkleSeed: 10 + i * 3,
       embedBack: 0.008,
@@ -553,7 +553,7 @@ function buildUpperOutfit(rig: CharacterRig) {
     corduraParts.push(body);
 
     const flap = createSoftClothPouch({
-      width: 0.034,
+      width: 0.032,
       height: 0.044,
       depth: 0.0085,
       pillow: 0.0035,
@@ -561,34 +561,34 @@ function buildUpperOutfit(rig: CharacterRig) {
       wrinkleSeed: 22 + i * 3,
       embedBack: 0.006,
     });
-    transformGeo(flap, [px, py + 0.039, pz + 0.023], [0.05, yaw, 0]);
+    transformGeo(flap, [px, py + 0.039, pz + 0.022], [0.05, yaw, 0]);
     applySkinWeights(flap, rig, { allowedBones: ['Spine_02', 'Chest'], sharpness: 3.2 });
     corduraParts.push(flap);
 
     const stud = createGrommetRing(0.0035, 0.0019);
-    transformGeo(stud, [px, py + 0.026, pz + 0.0335], [0, yaw, 0]);
+    transformGeo(stud, [px, py + 0.026, pz + 0.0325], [0, yaw, 0]);
     applySkinWeights(stud, rig, { allowedBones: ['Spine_02', 'Chest'], sharpness: 3.4 });
     gunmetalParts.push(stud);
   }
 
   // Smaller outer right soft cloth flap pocket with snap stud
   {
-    const px = -0.156;
+    const px = -0.143;
     const py = 1.246;
-    const pz = 0.106;
-    const yaw = -0.58;
+    const pz = 0.098;
+    const yaw = -0.60;
     const smallPouch = createSoftClothPouch({
-      width: 0.046,
+      width: 0.044,
       height: 0.074,
-      depth: 0.019,
-      pillow: 0.0045,
+      depth: 0.018,
+      pillow: 0.0042,
       cornerRadius: 0.009,
       wrinkleSeed: 35,
       embedBack: 0.008,
     });
     transformGeo(smallPouch, [px, py, pz], [0, yaw, 0]);
     const smallFlap = createSoftClothPouch({
-      width: 0.048,
+      width: 0.046,
       height: 0.030,
       depth: 0.0075,
       pillow: 0.003,
@@ -596,9 +596,9 @@ function buildUpperOutfit(rig: CharacterRig) {
       wrinkleSeed: 39,
       embedBack: 0.006,
     });
-    transformGeo(smallFlap, [px - 0.009, py + 0.022, pz + 0.017], [0.05, yaw, 0]);
+    transformGeo(smallFlap, [px - 0.009, py + 0.022, pz + 0.016], [0.05, yaw, 0]);
     const stud = createGrommetRing(0.0038, 0.0020);
-    transformGeo(stud, [px - 0.013, py + 0.014, pz + 0.024], [0, yaw, 0]);
+    transformGeo(stud, [px - 0.013, py + 0.014, pz + 0.023], [0, yaw, 0]);
     for (const p of [smallPouch, smallFlap]) {
       applySkinWeights(p, rig, { allowedBones: ['Spine_02', 'Chest'], sharpness: 3.2 });
       corduraParts.push(p);
@@ -609,17 +609,17 @@ function buildUpperOutfit(rig: CharacterRig) {
 
   // LEFT CHEST (+X): Large softly pillowed, convex-curved pleated bellows cargo pocket with center divider crease
   {
-    const px = 0.098;
+    const px = 0.089;
     const py = 1.258;
-    const pz = 0.143;
-    const yaw = 0.28;
+    const pz = 0.130;
+    const yaw = 0.29;
     const bellows = createSoftClothPouch({
-      width: 0.118,
-      height: 0.128,
-      depth: 0.028,
-      pillow: 0.008,
+      width: 0.108,
+      height: 0.126,
+      depth: 0.026,
+      pillow: 0.0075,
       cornerRadius: 0.016,
-      curveRadiusX: 0.24,
+      curveRadiusX: 0.215,
       pleats: 2,
       centerCrease: true,
       wrinkleSeed: 48,
@@ -630,21 +630,21 @@ function buildUpperOutfit(rig: CharacterRig) {
     corduraParts.push(bellows);
 
     const flap = createSoftClothPouch({
-      width: 0.122,
-      height: 0.044,
-      depth: 0.0095,
-      pillow: 0.004,
+      width: 0.112,
+      height: 0.043,
+      depth: 0.009,
+      pillow: 0.0038,
       cornerRadius: 0.012,
-      curveRadiusX: 0.25,
+      curveRadiusX: 0.225,
       wrinkleSeed: 53,
       embedBack: 0.008,
     });
-    transformGeo(flap, [px + 0.007, py + 0.044, pz + 0.027], [0.05, yaw, 0]);
+    transformGeo(flap, [px + 0.007, py + 0.043, pz + 0.025], [0.05, yaw, 0]);
     applySkinWeights(flap, rig, { allowedBones: ['Spine_02', 'Chest'], sharpness: 3.1 });
     corduraParts.push(flap);
 
     const btn = createGrommetRing(0.0052, 0.0022);
-    transformGeo(btn, [px + 0.010, py + 0.030, pz + 0.038], [0, yaw, 0]);
+    transformGeo(btn, [px + 0.010, py + 0.029, pz + 0.036], [0, yaw, 0]);
     applySkinWeights(btn, rig, { allowedBones: ['Spine_02', 'Chest'], sharpness: 3.2 });
     gunmetalParts.push(btn);
   }
@@ -652,18 +652,18 @@ function buildUpperOutfit(rig: CharacterRig) {
   // LOWER TORSO: Softly pillowed convex-curved front waist cargo pockets + 3D raised stitch seam piping
   for (const side of ['L', 'R'] as const) {
     const s = side === 'L' ? 1 : -1;
-    const px = 0.098 * s;
+    const px = 0.091 * s;
     const py = 1.078;
-    const pz = 0.122;
-    const yaw = 0.34 * s;
+    const pz = 0.114;
+    const yaw = 0.35 * s;
 
     const lowerPocket = createSoftClothPouch({
-      width: 0.114,
-      height: 0.118,
-      depth: 0.025,
-      pillow: 0.0075,
+      width: 0.106,
+      height: 0.116,
+      depth: 0.024,
+      pillow: 0.007,
       cornerRadius: 0.016,
-      curveRadiusX: 0.22,
+      curveRadiusX: 0.20,
       pleats: 2,
       wrinkleSeed: side === 'L' ? 61 : 67,
       embedBack: 0.010,
@@ -676,16 +676,16 @@ function buildUpperOutfit(rig: CharacterRig) {
     corduraParts.push(lowerPocket);
 
     const lowerFlap = createSoftClothPouch({
-      width: 0.118,
-      height: 0.037,
-      depth: 0.0085,
-      pillow: 0.0035,
+      width: 0.110,
+      height: 0.036,
+      depth: 0.0082,
+      pillow: 0.0033,
       cornerRadius: 0.012,
-      curveRadiusX: 0.23,
+      curveRadiusX: 0.21,
       wrinkleSeed: side === 'L' ? 73 : 79,
       embedBack: 0.008,
     });
-    transformGeo(lowerFlap, [px + 0.008 * s, py + 0.043, pz + 0.025], [0.04, yaw, 0]);
+    transformGeo(lowerFlap, [px + 0.008 * s, py + 0.042, pz + 0.024], [0.04, yaw, 0]);
     applySkinWeights(lowerFlap, rig, {
       allowedBones: ['Pelvis', 'Spine_01', 'Spine_02'],
       sharpness: 2.9,
@@ -694,10 +694,10 @@ function buildUpperOutfit(rig: CharacterRig) {
 
     // 3D raised stitch piping princess seams
     const seamPts = [
-      new THREE.Vector3(0.032 * s, 0.960, 0.120),
-      new THREE.Vector3(0.034 * s, 1.120, 0.127),
-      new THREE.Vector3(0.038 * s, 1.320, 0.146),
-      new THREE.Vector3(0.045 * s, 1.490, 0.118),
+      new THREE.Vector3(0.030 * s, 0.960, 0.114),
+      new THREE.Vector3(0.032 * s, 1.120, 0.119),
+      new THREE.Vector3(0.035 * s, 1.320, 0.134),
+      new THREE.Vector3(0.042 * s, 1.490, 0.111),
     ];
     const seam = createTubeCurve(seamPts, 0.0022, 22, 6, false);
     applySkinWeights(seam, rig, {
