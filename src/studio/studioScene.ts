@@ -21,9 +21,42 @@ import {
   LightingPresetKey,
   LightingPresetSpec,
 } from './lightingPresets';
+import {
+  createInitialWeaponCombatState,
+  EquippedWeaponId,
+  FireMode,
+  startWeaponReload,
+  stepWeaponMechanics,
+  switchWeaponState,
+  toggleWeaponFireMode,
+  WEAPON_ORDER,
+  WEAPON_SPECS,
+  WeaponCombatState,
+  WeaponId,
+} from '../weapons/weaponTypes';
+import { createWeaponMaterials, WeaponMaterialLibrary } from '../weapons/weaponMaterials';
+import { BuiltWeapon } from '../weapons/weaponGeoHelpers';
+import { buildWeaponArsenal } from '../weapons/weaponModels';
+import { WeaponIKController } from '../weapons/weaponIK';
+import { CombatFXSystem } from '../weapons/combatFX';
+import { weaponAudio } from '../weapons/weaponAudio';
 
-export { DEFAULT_LIGHTING_PRESET, LIGHTING_PRESETS };
-export type { LightingPresetKey, LightingPresetSpec };
+export { DEFAULT_LIGHTING_PRESET, LIGHTING_PRESETS, WEAPON_ORDER, WEAPON_SPECS };
+export type { EquippedWeaponId, FireMode, LightingPresetKey, LightingPresetSpec, WeaponId };
+
+export interface WeaponHUDState {
+  equipped: EquippedWeaponId;
+  mag: number;
+  magSize: number;
+  reserve: number;
+  fireMode: FireMode | null;
+  isReloading: boolean;
+  reloadProgress: number;
+  isInspecting: boolean;
+  laserEnabled: boolean;
+  reticleSpread: number;
+  gunTurntable: boolean;
+}
 
 export type CameraPresetKey =
   | 'full_body'
@@ -79,6 +112,7 @@ export interface StudioCallbacks {
   onStatsReady?: (stats: BuiltCharacter['stats']) => void;
   onModeChange?: (mode: StudioMode) => void;
   onAimStateChange?: (isAiming: boolean) => void;
+  onWeaponStateChange?: (weaponState: WeaponHUDState) => void;
 }
 
 export interface StudioDisplayOptions {
@@ -163,7 +197,16 @@ declare global {
       setMode: (mode: StudioMode) => void;
       setLighting: (preset: string) => void;
       setDisplay: (opts: StudioDisplayOptions) => void;
+      setWeapon: (id: EquippedWeaponId) => void;
+      setGunTurntable: (enabled: boolean) => void;
+      setAim: (aiming: boolean) => void;
+      setInspect: (inspecting: boolean) => void;
+      setLaser: (enabled: boolean) => void;
+      triggerFire: () => void;
+      setReloadProgress: (progress: number | null) => void;
+      setMagCount: (count: number) => void;
       exportGLBBase64: () => Promise<string>;
+      exportWeaponGLBBase64: (id?: WeaponId) => Promise<string>;
       loadExportedGLBBase64: (base64: string) => Promise<{
         meshCount: number;
         boneCount: number;
@@ -172,6 +215,7 @@ declare global {
       }>;
       restoreProceduralCharacter: () => void;
       getStats: () => Record<string, unknown>;
+      getWeaponState: () => WeaponHUDState;
     };
   }
 }
@@ -241,6 +285,18 @@ export class CharacterStudioEngine {
   private lastPointerY = 0;
   private lastReportedAim = false;
   private manualMorphOverrides: Partial<Record<FacialMorphName, number>> = {};
+
+  // 5-Weapon Tactical Arsenal, 2-Bone Analytical IK & Combat FX
+  private weaponMaterials: WeaponMaterialLibrary;
+  private weaponArsenal: Record<WeaponId, BuiltWeapon>;
+  private weaponContainer: THREE.Group;
+  private weaponIK: WeaponIKController;
+  private combatFX: CombatFXSystem;
+  private weaponState: WeaponCombatState = createInitialWeaponCombatState('mk18');
+  private gunTurntable = false;
+  private reloadLockedProgress: number | null = null;
+  private inspectAimOverride = false;
+  private lastWeaponHudEmit = 0;
 
   // Reusable scratch math objects (ZERO per-frame GC!)
   private readonly _v1 = new THREE.Vector3();
@@ -424,6 +480,20 @@ export class CharacterStudioEngine {
 
     this.playAnimation('Idle_Natural', 0);
 
+    // 5b. Build 5-Weapon Tactical Arsenal + Real-Time 2-Bone IK + Combat VFX
+    this.weaponMaterials = createWeaponMaterials(maxAniso);
+    this.weaponArsenal = buildWeaponArsenal(this.weaponMaterials);
+    this.weaponContainer = new THREE.Group();
+    this.weaponContainer.name = 'Active_Weapon_Container';
+    this.scene.add(this.weaponContainer);
+    for (const id of WEAPON_ORDER) {
+      const w = this.weaponArsenal[id];
+      w.root.visible = id === this.weaponState.equipped;
+      this.weaponContainer.add(w.root);
+    }
+    this.weaponIK = new WeaponIKController(this.character.rig);
+    this.combatFX = new CombatFXSystem(this.scene);
+
     // Pre-warm shaders on GPU
     if (!this.isSoftwareGl) {
       this.renderer.compile(this.scene, this.camera);
@@ -436,6 +506,7 @@ export class CharacterStudioEngine {
     this.bindEvents();
     this.exposeAutomationAPI();
     this.callbacks.onStatsReady?.(this.character.stats);
+    this.emitWeaponHud(true);
 
     // Start render loop
     this.tick();
@@ -454,6 +525,7 @@ export class CharacterStudioEngine {
 
     const dom = this.renderer.domElement;
     dom.addEventListener('mousedown', this.handleMouseDown);
+    dom.addEventListener('wheel', this.handleWheel, { passive: true });
     window.addEventListener('mouseup', this.handleMouseUp);
     window.addEventListener('mousemove', this.handleMouseMove);
     dom.addEventListener('contextmenu', this.handleContextMenu);
@@ -479,7 +551,56 @@ export class CharacterStudioEngine {
     e.preventDefault();
   };
 
+  private handleWheel = (e: WheelEvent) => {
+    if (this.mode !== 'combat' || this.gunTurntable) return;
+    const dir = e.deltaY > 0 ? 1 : -1;
+    const curIdx =
+      this.weaponState.equipped === 'none'
+        ? -1
+        : WEAPON_ORDER.indexOf(this.weaponState.equipped);
+    const nextIdx = (curIdx + dir + WEAPON_ORDER.length) % WEAPON_ORDER.length;
+    this.setWeapon(WEAPON_ORDER[nextIdx]);
+  };
+
   private handleKeyDown = (e: KeyboardEvent) => {
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+    // Global tactical weapon shortcuts (active in both Inspect & Combat modes!)
+    if (!e.repeat) {
+      switch (e.code) {
+        case 'Digit1':
+          this.setWeapon('mk18');
+          return;
+        case 'Digit2':
+          this.setWeapon('ak74m');
+          return;
+        case 'Digit3':
+          this.setWeapon('m870');
+          return;
+        case 'Digit4':
+          this.setWeapon('awm');
+          return;
+        case 'Digit5':
+          this.setWeapon('glock19');
+          return;
+        case 'Digit0':
+          if (!this.gunTurntable) this.setWeapon('none');
+          return;
+        case 'KeyR':
+          this.triggerReload();
+          return;
+        case 'KeyB':
+          this.toggleFireMode();
+          return;
+        case 'KeyI':
+          this.toggleWeaponInspect();
+          return;
+        case 'KeyL':
+          this.toggleLaser();
+          return;
+      }
+    }
+
     if (this.mode !== 'combat') return;
     switch (e.code) {
       case 'KeyW':
@@ -637,6 +758,9 @@ export class CharacterStudioEngine {
 
   public setMode(mode: StudioMode): void {
     if (this.mode === mode) return;
+    if (mode === 'combat' && this.gunTurntable) {
+      this.setGunTurntable(false);
+    }
     this.mode = mode;
     if (mode === 'combat') {
       this.controls.enabled = false;
@@ -744,11 +868,163 @@ export class CharacterStudioEngine {
     this.overheadSpot.decay = spec.overheadSpot.decay;
   }
 
-  /** Exports ONLY Hero_Commando_Rig (zero studio lights/backdrop/floor!) as binary glTF 2.0 (.glb) */
+  public getActiveWeapon(): BuiltWeapon | null {
+    if (this.weaponState.equipped === 'none') return null;
+    return this.weaponArsenal[this.weaponState.equipped];
+  }
+
+  public getWeaponHUDState(): WeaponHUDState {
+    const id = this.weaponState.equipped;
+    if (id === 'none') {
+      return {
+        equipped: 'none',
+        mag: 0,
+        magSize: 0,
+        reserve: 0,
+        fireMode: null,
+        isReloading: false,
+        reloadProgress: 0,
+        isInspecting: false,
+        laserEnabled: this.weaponState.laserEnabled,
+        reticleSpread: this.weaponState.reticleSpread,
+        gunTurntable: this.gunTurntable,
+      };
+    }
+    const spec = WEAPON_SPECS[id];
+    const ammo = this.weaponState.ammo[id];
+    return {
+      equipped: id,
+      mag: ammo.mag,
+      magSize: spec.magSize,
+      reserve: ammo.reserve,
+      fireMode: ammo.fireMode,
+      isReloading: this.weaponState.isReloading,
+      reloadProgress: this.weaponState.reloadProgress,
+      isInspecting: this.weaponState.isInspecting,
+      laserEnabled: this.weaponState.laserEnabled,
+      reticleSpread: this.weaponState.reticleSpread,
+      gunTurntable: this.gunTurntable,
+    };
+  }
+
+  private emitWeaponHud(force = false): void {
+    const now = performance.now();
+    if (!force && now - this.lastWeaponHudEmit < 85) return;
+    this.lastWeaponHudEmit = now;
+    this.callbacks.onWeaponStateChange?.(this.getWeaponHUDState());
+  }
+
+  public setWeapon(id: EquippedWeaponId): void {
+    if (this.gunTurntable && id === 'none') return;
+    this.reloadLockedProgress = null;
+    const changed = switchWeaponState(this.weaponState, id);
+    for (const wid of WEAPON_ORDER) {
+      this.weaponArsenal[wid].root.visible = wid === id;
+    }
+    if (changed && id !== 'none') {
+      weaponAudio.playMagIn();
+      if (this.gunTurntable) {
+        this.frameGunTurntable(id, false);
+      }
+    }
+    this.emitWeaponHud(true);
+  }
+
+  public toggleFireMode(): void {
+    const mode = toggleWeaponFireMode(this.weaponState);
+    if (mode) {
+      weaponAudio.playDryFire();
+      this.emitWeaponHud(true);
+    }
+  }
+
+  public triggerReload(): void {
+    this.reloadLockedProgress = null;
+    if (startWeaponReload(this.weaponState)) {
+      this.emitWeaponHud(true);
+    }
+  }
+
+  public toggleWeaponInspect(): void {
+    if (this.weaponState.equipped === 'none' || this.gunTurntable) return;
+    this.weaponState.isInspecting = !this.weaponState.isInspecting;
+    this.weaponState.inspectTime = 0;
+    this.emitWeaponHud(true);
+  }
+
+  public toggleLaser(): void {
+    this.weaponState.laserEnabled = !this.weaponState.laserEnabled;
+    weaponAudio.playDryFire();
+    this.emitWeaponHud(true);
+  }
+
+  public triggerTestShot(): void {
+    if (this.weaponState.equipped === 'none') return;
+    const w = this.getActiveWeapon();
+    if (!w) return;
+    this.weaponState.equipBlend = 1;
+    this.weaponState.fireCooldown = 0;
+    this.weaponState.cycleActive = false;
+    this.weaponState.isReloading = false;
+    const ev = stepWeaponMechanics(this.weaponState, true, this.inputState.aim || this.inspectAimOverride, 0, 0.016, 0.55);
+    this.handleWeaponEvents(ev, w, this.weaponState.equipped, this.inputState.aim || this.inspectAimOverride);
+    this.weaponState.triggerHeldPrev = false;
+    this.emitWeaponHud(true);
+  }
+
+  private frameGunTurntable(id: WeaponId, immediate = false): void {
+    const spec = WEAPON_SPECS[id];
+    const cy = 1.04 + spec.turntableCenter[1];
+    const cz = spec.turntableCenter[2];
+    const dist = spec.turntableDist;
+    // Crisp side-3/4 macro showcase angle showing ejection port, rail teeth, scope & magazine cleanly!
+    const sideX = id === 'm870' ? dist * 0.92 : -dist * 0.92;
+    this.camTargetPos.set(sideX, cy + dist * 0.14, cz + dist * 0.36);
+    this.camTargetLook.set(0, cy, cz);
+    this.controls.minDistance = 0.14;
+    this.controls.maxDistance = 3.2;
+    if (immediate) {
+      this.camera.position.copy(this.camTargetPos);
+      this.controls.target.copy(this.camTargetLook);
+      this.controls.update();
+      this.camLerpActive = false;
+    } else {
+      this.camLerpActive = true;
+    }
+  }
+
+  public setGunTurntable(enabled: boolean): void {
+    if (this.gunTurntable === enabled) return;
+    this.gunTurntable = enabled;
+    if (enabled) {
+      if (this.mode === 'combat') {
+        this.setMode('inspect');
+      }
+      if (this.weaponState.equipped === 'none') {
+        this.setWeapon('mk18');
+      }
+      this.character.exportGroup.visible = false;
+      this.contactShadowMesh.visible = false;
+      this.skeletonHelper.visible = false;
+      this.combatFX.clearDynamic();
+      const id = this.weaponState.equipped as WeaponId;
+      this.frameGunTurntable(id, false);
+    } else {
+      this.character.exportGroup.visible = true;
+      this.contactShadowMesh.visible = true;
+      this.controls.minDistance = 0.34;
+      this.controls.maxDistance = 6.5;
+      this.setCameraPreset('full_body', false);
+    }
+    this.emitWeaponHud(true);
+  }
+
+  /** Exports ONLY Hero_Commando_Rig (zero studio lights/backdrop/floor/weapons!) as binary glTF 2.0 (.glb) */
   public async exportGLBArrayBuffer(): Promise<ArrayBuffer> {
-    // Temporarily reset character world transform & bind pose cleanly for pristine UE5 export
     const savedPos = this.character.exportGroup.position.clone();
     const savedRot = this.character.exportGroup.rotation.clone();
+    const savedVis = this.character.exportGroup.visible;
+    this.character.exportGroup.visible = true;
     this.character.exportGroup.position.set(0, 0, 0);
     this.character.exportGroup.rotation.set(0, 0, 0);
     this.character.exportGroup.updateMatrixWorld(true);
@@ -763,7 +1039,71 @@ export class CharacterStudioEngine {
 
     this.character.exportGroup.position.copy(savedPos);
     this.character.exportGroup.rotation.copy(savedRot);
+    this.character.exportGroup.visible = savedVis;
     this.character.exportGroup.updateMatrixWorld(true);
+    return glb;
+  }
+
+  /**
+   * Modular UE5 Weapon `.GLB` Exporter:
+   * Exports ONLY the selected weapon at clean real-world scale (1,1,1) with all named UE5 sockets
+   * (Grip_Right, Grip_Left, Muzzle_Tip, Ejection_Port, Mag_Pivot, Bolt_Or_Slide, Trigger_Pivot)
+   * and embedded procedural PBR textures!
+   */
+  public async exportWeaponGLBArrayBuffer(id?: WeaponId): Promise<ArrayBuffer> {
+    const targetId: WeaponId =
+      id ?? (this.weaponState.equipped !== 'none' ? this.weaponState.equipped : 'mk18');
+    const weapon = this.weaponArsenal[targetId];
+
+    const savedPos = weapon.root.position.clone();
+    const savedQuat = weapon.root.quaternion.clone();
+    const savedScale = weapon.root.scale.clone();
+    const savedVis = weapon.root.visible;
+    const savedBoltPos = weapon.boltOrSlide.position.clone();
+    const savedBoltRot = weapon.boltOrSlide.rotation.clone();
+    const savedMagPos = weapon.magPivot.position.clone();
+    const savedMagRot = weapon.magPivot.rotation.clone();
+    const savedTrigRot = weapon.triggerPivot.rotation.clone();
+
+    weapon.root.visible = true;
+    weapon.root.position.set(0, 0, 0);
+    weapon.root.quaternion.identity();
+    weapon.root.scale.set(1, 1, 1);
+    weapon.boltOrSlide.position.copy(weapon.boltRestPos);
+    weapon.boltOrSlide.rotation.copy(weapon.boltRestRot);
+    weapon.magPivot.position.copy(weapon.magRestPos);
+    weapon.magPivot.rotation.copy(weapon.magRestRot);
+    weapon.triggerPivot.rotation.set(0, 0, 0);
+    const fullSpec = WEAPON_SPECS[targetId];
+    weapon.liveAmmo.syncLiveAmmo(
+      fullSpec.magSize,
+      fullSpec.magSize,
+      false,
+      0,
+      fullSpec.magSize,
+      fullSpec.reserveMax,
+      0
+    );
+    weapon.root.updateMatrixWorld(true);
+
+    const exporter = new GLTFExporter();
+    const glb = (await exporter.parseAsync(weapon.root, {
+      binary: true,
+      onlyVisible: true,
+      includeCustomExtensions: false,
+    })) as ArrayBuffer;
+
+    weapon.root.position.copy(savedPos);
+    weapon.root.quaternion.copy(savedQuat);
+    weapon.root.scale.copy(savedScale);
+    weapon.root.visible = savedVis;
+    weapon.boltOrSlide.position.copy(savedBoltPos);
+    weapon.boltOrSlide.rotation.copy(savedBoltRot);
+    weapon.magPivot.position.copy(savedMagPos);
+    weapon.magPivot.rotation.copy(savedMagRot);
+    weapon.triggerPivot.rotation.copy(savedTrigRot);
+    this.syncActiveWeaponLiveAmmo(weapon);
+    weapon.root.updateMatrixWorld(true);
     return glb;
   }
 
@@ -774,6 +1114,21 @@ export class CharacterStudioEngine {
     const a = document.createElement('a');
     a.href = url;
     a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.setTimeout(() => URL.revokeObjectURL(url), 4000);
+  }
+
+  public async downloadWeaponGLB(id?: WeaponId): Promise<void> {
+    const targetId: WeaponId =
+      id ?? (this.weaponState.equipped !== 'none' ? this.weaponState.equipped : 'mk18');
+    const buffer = await this.exportWeaponGLBArrayBuffer(targetId);
+    const blob = new Blob([buffer], { type: 'model/gltf-binary' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `weapon_${targetId}_ue5.glb`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -827,8 +1182,94 @@ export class CharacterStudioEngine {
         this.setDisplayOptions(opts);
         this.renderer.render(this.scene, this.camera);
       },
+      setWeapon: (id: EquippedWeaponId) => {
+        this.setWeapon(id);
+        this.weaponState.equipBlend = 1;
+        this.updateInspectMode(0.016);
+        this.renderer.render(this.scene, this.camera);
+      },
+      setGunTurntable: (enabled: boolean) => {
+        this.setGunTurntable(enabled);
+        if (enabled && this.weaponState.equipped !== 'none') {
+          this.frameGunTurntable(this.weaponState.equipped, true);
+        }
+        this.updateInspectMode(0.016);
+        this.renderer.render(this.scene, this.camera);
+      },
+      setAim: (aiming: boolean) => {
+        this.inspectAimOverride = aiming;
+        this.inputState.aim = aiming;
+        this.callbacks.onAimStateChange?.(aiming);
+        // Settle ADS blend immediately for deterministic inspection
+        for (let i = 0; i < 20; i++) {
+          this.updateInspectMode(0.03);
+        }
+        this.renderer.render(this.scene, this.camera);
+      },
+      setInspect: (inspecting: boolean) => {
+        this.weaponState.isInspecting = inspecting;
+        this.weaponState.inspectTime = 0.6;
+        this.updateInspectMode(0.016);
+        this.renderer.render(this.scene, this.camera);
+      },
+      setLaser: (enabled: boolean) => {
+        this.weaponState.laserEnabled = enabled;
+        this.updateInspectMode(0.016);
+        this.renderer.render(this.scene, this.camera);
+      },
+      triggerFire: () => {
+        this.triggerTestShot();
+        // Step one frame so brass casing visibly clears ejection port mid-air while muzzle flash is bright!
+        const w = this.getActiveWeapon();
+        if (w && this.weaponState.equipped !== 'none') {
+          this.syncActiveWeaponLiveAmmo(w);
+          this.weaponIK.update(w, this.weaponState, this.inspectAimOverride, false, 0, 0.016);
+          this.combatFX.update(0.028, this.camera, w, this.weaponState.equipped, this.weaponState.muzzleFlashTimer, this.weaponState.laserEnabled);
+        }
+        this.renderer.render(this.scene, this.camera);
+      },
+      setReloadProgress: (progress: number | null) => {
+        this.reloadLockedProgress = progress;
+        if (progress === null) {
+          this.weaponState.isReloading = false;
+          this.weaponState.reloadProgress = 0;
+        } else {
+          if (!this.weaponState.isReloading && this.weaponState.equipped !== 'none') {
+            this.weaponState.preReloadMag = this.weaponState.ammo[this.weaponState.equipped].mag;
+          }
+          this.weaponState.isReloading = true;
+          this.weaponState.reloadProgress = progress;
+        }
+        this.updateInspectMode(0.016);
+        this.renderer.render(this.scene, this.camera);
+      },
+      setMagCount: (count: number) => {
+        if (this.weaponState.equipped === 'none') return;
+        const id = this.weaponState.equipped;
+        const spec = WEAPON_SPECS[id];
+        const clamped = Math.max(0, Math.min(spec.magSize, Math.round(count)));
+        this.weaponState.ammo[id].mag = clamped;
+        this.weaponState.preReloadMag = clamped;
+        this.weaponState.slideLockedBack = id === 'glock19' && clamped === 0;
+        this.weaponState.boltTravel = this.weaponState.slideLockedBack ? 1 : 0;
+        const w = this.getActiveWeapon();
+        if (w) this.syncActiveWeaponLiveAmmo(w);
+        this.updateInspectMode(0.016);
+        this.emitWeaponHud(true);
+        this.renderer.render(this.scene, this.camera);
+      },
       exportGLBBase64: async () => {
         const ab = await this.exportGLBArrayBuffer();
+        const bytes = new Uint8Array(ab);
+        let binary = '';
+        const chunk = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunk) {
+          binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+        }
+        return btoa(binary);
+      },
+      exportWeaponGLBBase64: async (id?: WeaponId) => {
+        const ab = await this.exportWeaponGLBArrayBuffer(id);
         const bytes = new Uint8Array(ab);
         let binary = '';
         const chunk = 0x8000;
@@ -910,7 +1351,10 @@ export class CharacterStudioEngine {
         activeLighting: this.activeLighting,
         mode: this.mode,
         isSoftwareGl: this.isSoftwareGl,
+        equippedWeapon: this.weaponState.equipped,
+        gunTurntable: this.gunTurntable,
       }),
+      getWeaponState: () => this.getWeaponHUDState(),
     };
   }
 
@@ -966,9 +1410,139 @@ export class CharacterStudioEngine {
     }
   };
 
+  private handleWeaponEvents(
+    ev: ReturnType<typeof stepWeaponMechanics>,
+    weapon: BuiltWeapon,
+    weaponId: WeaponId,
+    isAiming: boolean
+  ): void {
+    if (ev.fired) {
+      weaponAudio.playGunshot(weaponId);
+      this.combatFX.spawnShotFX(weapon, weaponId, isAiming);
+      // Subtle recoil camera kick in Combat Mode
+      if (this.mode === 'combat') {
+        const kick = WEAPON_SPECS[weaponId].cameraKick * (isAiming ? 0.65 : 1.0);
+        this.combatCamPitch = Math.max(-0.35, this.combatCamPitch - kick);
+      }
+      this.emitWeaponHud(true);
+    }
+    if (ev.dryFired) {
+      weaponAudio.playDryFire();
+    }
+    if (ev.ejectCasing) {
+      this.combatFX.spawnEjectedCasing(weapon, weaponId);
+    }
+    if (ev.pumpSound) {
+      weaponAudio.playPumpRack();
+    }
+    if (ev.boltCycleSound) {
+      weaponAudio.playSniperBoltCycle();
+    }
+    if (ev.magOutSound) {
+      weaponAudio.playMagOut();
+    }
+    if (ev.magInSound) {
+      weaponAudio.playMagIn();
+      this.emitWeaponHud(true);
+    }
+    if (ev.boltRackSound) {
+      weaponAudio.playBoltRack();
+    }
+    if (ev.reloadCompleted) {
+      this.emitWeaponHud(true);
+    }
+  }
+
   private updateInspectMode(dt: number): void {
-    if (this.animLockedTime === null) {
-      this.mixer.update(dt);
+    const activeWeapon = this.getActiveWeapon();
+
+    if (this.gunTurntable && activeWeapon && this.weaponState.equipped !== 'none') {
+      // Isolated 5cm Gun Macro Turntable Showcase!
+      if (this.reloadLockedProgress !== null) {
+        this.weaponState.isReloading = true;
+        this.weaponState.reloadProgress = this.reloadLockedProgress;
+      } else {
+        const ev = stepWeaponMechanics(this.weaponState, false, false, 0, dt, Math.random());
+        this.handleWeaponEvents(ev, activeWeapon, this.weaponState.equipped, false);
+      }
+
+      activeWeapon.root.position.set(0, 1.04, 0);
+      activeWeapon.root.quaternion.identity();
+      activeWeapon.root.scale.set(1, 1, 1);
+
+      // Articulate bolt/slide/trigger/mag cleanly on turntable
+      activeWeapon.triggerPivot.rotation.x = -this.weaponState.triggerPull * 0.38;
+      activeWeapon.boltOrSlide.position.copy(activeWeapon.boltRestPos);
+      activeWeapon.boltOrSlide.position.z -= this.weaponState.boltTravel * activeWeapon.boltTravelMax;
+      activeWeapon.boltOrSlide.rotation.copy(activeWeapon.boltRestRot);
+      if (activeWeapon.boltLiftMax > 0) {
+        activeWeapon.boltOrSlide.rotation.z = -this.weaponState.boltLift * activeWeapon.boltLiftMax;
+      }
+      if (this.weaponState.isReloading) {
+        const p = this.weaponState.reloadProgress;
+        const drop = Math.sin(Math.min(1, p) * Math.PI) * 0.14;
+        activeWeapon.magPivot.position.copy(activeWeapon.magRestPos);
+        activeWeapon.magPivot.position.y -= drop;
+      } else {
+        activeWeapon.magPivot.position.copy(activeWeapon.magRestPos);
+        activeWeapon.magPivot.rotation.copy(activeWeapon.magRestRot);
+      }
+      activeWeapon.root.updateMatrixWorld(true);
+      this.syncActiveWeaponLiveAmmo(activeWeapon);
+
+      this.combatFX.update(
+        dt,
+        this.camera,
+        activeWeapon,
+        this.weaponState.equipped,
+        this.weaponState.muzzleFlashTimer,
+        this.weaponState.laserEnabled
+      );
+      this.emitWeaponHud(false);
+    } else {
+      if (this.animLockedTime === null) {
+        this.mixer.update(dt);
+      }
+
+      if (activeWeapon && this.weaponState.equipped !== 'none') {
+        if (this.reloadLockedProgress !== null) {
+          this.weaponState.isReloading = true;
+          this.weaponState.reloadProgress = this.reloadLockedProgress;
+        } else {
+          const ev = stepWeaponMechanics(
+            this.weaponState,
+            false,
+            this.inspectAimOverride,
+            0,
+            dt,
+            Math.random()
+          );
+          this.handleWeaponEvents(ev, activeWeapon, this.weaponState.equipped, this.inspectAimOverride);
+        }
+
+        const isAimPose =
+          this.inspectAimOverride ||
+          this.activeAnimName === 'Combat_Aim_Stance' ||
+          this.activeAnimName === 'Combat_Fire_Burst';
+        const isSprintPose = this.activeAnimName === 'Sprint_Combat';
+        this.syncActiveWeaponLiveAmmo(activeWeapon);
+        this.weaponIK.update(activeWeapon, this.weaponState, isAimPose, isSprintPose, 0, dt);
+
+        if (isAimPose) {
+          this.character.setMorphTarget('Brow_Focus', 0.82);
+        }
+        this.combatFX.update(
+          dt,
+          this.camera,
+          activeWeapon,
+          this.weaponState.equipped,
+          this.weaponState.muzzleFlashTimer,
+          this.weaponState.laserEnabled
+        );
+        this.emitWeaponHud(false);
+      } else {
+        this.combatFX.update(dt, this.camera, null, 'none', 0, false);
+      }
     }
 
     if (this.camLerpActive) {
@@ -986,15 +1560,22 @@ export class CharacterStudioEngine {
   }
 
   private updateCombatMode(dt: number): void {
+    const activeWeapon = this.getActiveWeapon();
+    const hasWeapon = activeWeapon !== null && this.weaponState.equipped !== 'none';
+
     const res = stepCombatController(
       this.ctrlState,
-      this.inputState,
+      {
+        ...this.inputState,
+        // Weapon mechanics owns fire rate & recoil when a firearm is equipped
+        firePressed: hasWeapon ? false : this.inputState.firePressed,
+      },
       this.combatCamYaw,
       this.combatCamPitch,
       dt
     );
 
-    if (res.firedThisStep) {
+    if (!hasWeapon && res.firedThisStep) {
       tacticalAudio.playGunshot();
     }
 
@@ -1003,8 +1584,24 @@ export class CharacterStudioEngine {
       this.callbacks.onAimStateChange?.(this.ctrlState.isAiming);
     }
 
+    // Step active firearm mechanics (Full-Auto / Semi / Pump / Bolt / Reload / Spring Recoil)
+    if (hasWeapon && this.weaponState.equipped !== 'none') {
+      const ev = stepWeaponMechanics(
+        this.weaponState,
+        this.inputState.firePressed,
+        this.ctrlState.isAiming,
+        this.ctrlState.speed,
+        dt,
+        Math.random()
+      );
+      this.handleWeaponEvents(ev, activeWeapon, this.weaponState.equipped, this.ctrlState.isAiming);
+    }
+
     // Crossfade smoothly to controller-driven clip
-    const targetClip = this.ctrlState.activeClip as AnimationName;
+    let targetClip = this.ctrlState.activeClip as AnimationName;
+    if (hasWeapon && this.weaponState.muzzleFlashTimer > 0 && this.ctrlState.isGrounded) {
+      targetClip = 'Combat_Fire_Burst';
+    }
     if (targetClip !== this.activeAnimName) {
       this.playAnimation(targetClip, 0.16);
     }
@@ -1015,8 +1612,9 @@ export class CharacterStudioEngine {
     const spine2 = this.character.rig.boneMap.get('Spine_02');
     const chest = this.character.rig.boneMap.get('Chest');
     const head = this.character.rig.boneMap.get('Head');
+    const recoilPitch = hasWeapon ? this.weaponState.recoilPitch * 0.65 : this.ctrlState.recoilAmount * 0.14;
     if (spine2 && chest && head) {
-      const pitch = this.ctrlState.aimPitch - this.ctrlState.recoilAmount * 0.14;
+      const pitch = this.ctrlState.aimPitch - recoilPitch;
       const yawOff = this.ctrlState.aimYawOffset;
       this._e1.set(pitch * 0.35, yawOff * 0.3, 0, 'YXZ');
       this._q1.setFromEuler(this._e1);
@@ -1038,29 +1636,60 @@ export class CharacterStudioEngine {
       this.ctrlState.posZ
     );
     this.character.exportGroup.rotation.y = this.ctrlState.yaw;
+    this.character.exportGroup.updateMatrixWorld(true);
 
     this.contactShadowMesh.position.set(this.ctrlState.posX, 0.0015, this.ctrlState.posZ);
     const airScale = Math.max(0.45, 1 - this.ctrlState.posY * 0.45);
     this.contactShadowMesh.scale.setScalar(airScale);
 
-    // Muzzle flash light pulse near hands when firing!
-    if (this.ctrlState.muzzleFlashTimer > 0) {
-      const fwdX = Math.sin(this.ctrlState.yaw);
-      const fwdZ = Math.cos(this.ctrlState.yaw);
-      this.muzzleLight.position.set(
-        this.ctrlState.posX + fwdX * 0.58,
-        this.ctrlState.posY + (this.ctrlState.isCrouching ? 1.05 : 1.42),
-        this.ctrlState.posZ + fwdZ * 0.58
+    // Run real-time 2-bone analytical IK & weapon VFX after character world transform is updated!
+    if (hasWeapon && this.weaponState.equipped !== 'none') {
+      const isSprinting = this.ctrlState.speed > 4.1 && !this.ctrlState.isAiming;
+      this.syncActiveWeaponLiveAmmo(activeWeapon);
+      this.weaponIK.update(
+        activeWeapon,
+        this.weaponState,
+        this.ctrlState.isAiming,
+        isSprinting,
+        this.ctrlState.aimPitch,
+        dt
       );
-      this.muzzleLight.intensity = 14.0 * (this.ctrlState.muzzleFlashTimer / 0.07);
-    } else {
+      if (this.ctrlState.isAiming) {
+        this.character.setMorphTarget('Brow_Focus', 0.85);
+      }
+      if (this.weaponState.muzzleFlashTimer > 0) {
+        this.character.setMorphTarget('Mouth_Grit_Fire', 0.72);
+      }
+      this.combatFX.update(
+        dt,
+        this.camera,
+        activeWeapon,
+        this.weaponState.equipped,
+        this.weaponState.muzzleFlashTimer,
+        this.weaponState.laserEnabled
+      );
       this.muzzleLight.intensity = 0;
+      this.emitWeaponHud(false);
+    } else {
+      this.combatFX.update(dt, this.camera, null, 'none', 0, false);
+      if (this.ctrlState.muzzleFlashTimer > 0) {
+        const fwdX = Math.sin(this.ctrlState.yaw);
+        const fwdZ = Math.cos(this.ctrlState.yaw);
+        this.muzzleLight.position.set(
+          this.ctrlState.posX + fwdX * 0.58,
+          this.ctrlState.posY + (this.ctrlState.isCrouching ? 1.05 : 1.42),
+          this.ctrlState.posZ + fwdZ * 0.58
+        );
+        this.muzzleLight.intensity = 14.0 * (this.ctrlState.muzzleFlashTimer / 0.07);
+      } else {
+        this.muzzleLight.intensity = 0;
+      }
     }
 
     // Smooth GTA-5 / Battlegrounds over-the-shoulder 3rd-person follow camera!
-    const dist = this.ctrlState.isAiming ? 1.65 : 2.95;
-    const shoulderRight = this.ctrlState.isAiming ? 0.44 : 0.22;
-    const lookHeight = this.ctrlState.isCrouching ? 1.12 : 1.46;
+    const dist = this.ctrlState.isAiming ? 1.48 : 2.95;
+    const shoulderRight = this.ctrlState.isAiming ? 0.42 : 0.22;
+    const lookHeight = this.ctrlState.isCrouching ? 1.12 : 1.48;
 
     const fwdX = Math.sin(this.combatCamYaw);
     const fwdZ = Math.cos(this.combatCamYaw);
@@ -1069,7 +1698,7 @@ export class CharacterStudioEngine {
 
     this._v1.set(
       this.ctrlState.posX - fwdX * dist * Math.cos(this.combatCamPitch) + rightX * shoulderRight,
-      this.ctrlState.posY + lookHeight + dist * Math.sin(this.combatCamPitch) + 0.16,
+      this.ctrlState.posY + lookHeight + dist * Math.sin(this.combatCamPitch) + 0.14,
       this.ctrlState.posZ - fwdZ * dist * Math.cos(this.combatCamPitch) + rightZ * shoulderRight
     );
     this._v2.set(
@@ -1083,12 +1712,32 @@ export class CharacterStudioEngine {
     this.controls.target.lerp(this._v2, k);
     this.camera.lookAt(this.controls.target);
 
-    // Subtle FOV punch on aiming/sprinting
-    const targetFov = this.ctrlState.isAiming ? 31 : this.ctrlState.speed > 4.2 ? 42 : 37;
+    // Subtle per-weapon ADS FOV zoom (tight sniper optic zoom on AWM!)
+    const activeSpec =
+      this.weaponState.equipped !== 'none' ? WEAPON_SPECS[this.weaponState.equipped] : null;
+    const targetFov = this.ctrlState.isAiming
+      ? (activeSpec?.adsFov ?? 31)
+      : this.ctrlState.speed > 4.2
+        ? 42
+        : 37;
     if (Math.abs(this.camera.fov - targetFov) > 0.05) {
-      this.camera.fov = dampScalar(this.camera.fov, targetFov, 9, dt);
+      this.camera.fov = dampScalar(this.camera.fov, targetFov, 10, dt);
       this.camera.updateProjectionMatrix();
     }
+  }
+
+  private syncActiveWeaponLiveAmmo(weapon: BuiltWeapon): void {
+    const spec = WEAPON_SPECS[weapon.id];
+    const ammo = this.weaponState.ammo[weapon.id];
+    weapon.liveAmmo.syncLiveAmmo(
+      ammo.mag,
+      spec.magSize,
+      this.weaponState.isReloading && this.weaponState.equipped === weapon.id,
+      this.weaponState.reloadProgress,
+      this.weaponState.preReloadMag,
+      ammo.reserve,
+      this.weaponState.boltTravel
+    );
   }
 
   public dispose(): void {
@@ -1106,10 +1755,16 @@ export class CharacterStudioEngine {
 
     const dom = this.renderer.domElement;
     dom.removeEventListener('mousedown', this.handleMouseDown);
+    dom.removeEventListener('wheel', this.handleWheel);
     dom.removeEventListener('contextmenu', this.handleContextMenu);
     dom.removeEventListener('webglcontextlost', this.handleContextLost);
 
     this.controls.dispose();
+    this.combatFX.dispose();
+    for (const id of WEAPON_ORDER) {
+      this.weaponArsenal[id].dispose();
+    }
+    this.weaponMaterials.dispose();
     this.character.dispose();
     this.backdropTex.dispose();
     this.shadowTex.dispose();

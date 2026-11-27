@@ -14,20 +14,19 @@ interface ControlRow {
 }
 
 const INSPECT_CONTROLS: ControlRow[] = [
-  { input: 'Left Drag', action: 'Orbit 360° around character' },
+  { input: 'Left Drag', action: 'Orbit 360° around character or weapon' },
   { input: 'Right Drag', action: 'Pan camera framing' },
-  { input: 'Scroll Wheel', action: 'Zoom in for skin & gear detail' },
-  { input: 'Sidebar Tabs', action: 'Switch Animations, Cameras & Morphs' },
-  { input: 'Right Panel', action: 'Test 4 PBR Lighting setups & Export .GLB' },
+  { input: 'Scroll Wheel', action: 'Zoom in (or cycle guns in Combat)' },
+  { input: '1 – 5 / 0', action: 'Switch 5 firearms or holster empty hands' },
+  { input: 'Arsenal Tab', action: 'Gun Macro Turntable & UE5 Gun .GLB' },
 ];
 
 const COMBAT_CONTROLS: ControlRow[] = [
-  { input: 'W A S D', action: 'Move & strafe in Combat Mode' },
-  { input: 'Shift / C', action: 'Sprint or toggle crouch stance' },
-  { input: 'Space', action: 'Jump action' },
-  { input: 'Hold RMB', action: 'Over-the-shoulder aim & mouse look' },
-  { input: 'Click LMB', action: 'Fire burst with procedural recoil' },
-  { input: 'Press H', action: 'Hide or restore full studio HUD' },
+  { input: 'W A S D', action: 'Move, strafe, Shift sprint, C crouch' },
+  { input: 'Hold RMB', action: 'Aim Down Sights (mildot scope on AWM)' },
+  { input: 'LMB / B', action: 'Fire weapon / toggle Auto & Semi' },
+  { input: 'R / I / L', action: 'Reload mag, inspect gun, toggle laser' },
+  { input: 'Space / H', action: 'Jump action / hide or restore HUD' },
 ];
 
 export function WelcomeGuideModal({
