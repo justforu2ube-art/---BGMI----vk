@@ -195,8 +195,8 @@ const WEAPON_ERGONOMICS: Record<WeaponId, WeaponErgonomicsConfig> = {
     readyRot: [0.025, 0.28, -0.025],
     adsPos: [-0.074, 0.134, 0.218],
     adsRot: [0.0, 0.04, 0.0],
-    sprintPos: [-0.06, -0.015, 0.25],
-    sprintRot: [0.34, 0.7, -0.2],
+    sprintPos: [-0.08, -0.02, 0.305],
+    sprintRot: [0.45, 0.52, -0.18],
     clavicleLProtract: 0.24,
     rightGripOffset: [0.002, 0.012, 0.005],
     rightPalmAnchor: [0.056, 0.002, -0.023],
@@ -218,8 +218,8 @@ const WEAPON_ERGONOMICS: Record<WeaponId, WeaponErgonomicsConfig> = {
     readyRot: [0.025, 0.28, -0.025],
     adsPos: [-0.074, 0.140, 0.224],
     adsRot: [0.0, 0.04, 0.0],
-    sprintPos: [-0.055, -0.015, 0.255],
-    sprintRot: [0.36, 0.72, -0.2],
+    sprintPos: [-0.08, -0.02, 0.31],
+    sprintRot: [0.45, 0.54, -0.18],
     clavicleLProtract: 0.24,
     rightGripOffset: [0.002, 0.011, 0.004],
     rightPalmAnchor: [0.056, 0.002, -0.023],
@@ -241,8 +241,8 @@ const WEAPON_ERGONOMICS: Record<WeaponId, WeaponErgonomicsConfig> = {
     readyRot: [0.02, 0.31, -0.02],
     adsPos: [-0.074, 0.146, 0.214],
     adsRot: [0.0, 0.05, 0.0],
-    sprintPos: [-0.055, -0.02, 0.255],
-    sprintRot: [0.34, 0.68, -0.18],
+    sprintPos: [-0.08, -0.02, 0.308],
+    sprintRot: [0.45, 0.52, -0.18],
     clavicleLProtract: 0.27,
     rightGripOffset: [0.002, 0.012, 0.005],
     rightPalmAnchor: [0.056, 0.002, -0.023],
@@ -264,8 +264,8 @@ const WEAPON_ERGONOMICS: Record<WeaponId, WeaponErgonomicsConfig> = {
     readyRot: [0.02, 0.31, -0.02],
     adsPos: [-0.074, 0.128, 0.218],
     adsRot: [0.0, 0.04, 0.0],
-    sprintPos: [-0.05, -0.025, 0.26],
-    sprintRot: [0.3, 0.66, -0.16],
+    sprintPos: [-0.075, -0.025, 0.315],
+    sprintRot: [0.45, 0.50, -0.16],
     clavicleLProtract: 0.27,
     rightGripOffset: [0.002, 0.014, 0.004],
     rightPalmAnchor: [0.056, 0.002, -0.023],
@@ -287,8 +287,8 @@ const WEAPON_ERGONOMICS: Record<WeaponId, WeaponErgonomicsConfig> = {
     readyRot: [0.03, 0.05, 0.0],
     adsPos: [-0.024, 0.168, 0.445],
     adsRot: [0.0, 0.0, 0.0],
-    sprintPos: [-0.14, 0.02, 0.28],
-    sprintRot: [0.52, 0.2, -0.14],
+    sprintPos: [-0.12, 0.01, 0.32],
+    sprintRot: [0.45, 0.22, -0.12],
     clavicleLProtract: 0.15,
     rightGripOffset: [0.002, 0.006, 0.005],
     rightPalmAnchor: [0.054, 0.002, -0.021],
@@ -309,6 +309,24 @@ const WEAPON_ERGONOMICS: Record<WeaponId, WeaponErgonomicsConfig> = {
 function smoothstep(t: number): number {
   const c = Math.max(0, Math.min(1, t));
   return c * c * (3 - 2 * c);
+}
+
+/**
+ * Runtime tactical Sprint_Combat chest clearance clamp:
+ * Enforces hand_r forward clearance Z >= +0.28m from spine_03 so receivers/stocks never clip torso armor.
+ */
+export function ensureChestClearance(
+  localPos: THREE.Vector3,
+  sprintBlend: number,
+  minForwardZ = 0.28
+): THREE.Vector3 {
+  if (sprintBlend > 0.05) {
+    const requiredZ = THREE.MathUtils.lerp(localPos.z, Math.max(localPos.z, minForwardZ), Math.min(1, sprintBlend * 1.4));
+    if (localPos.z < requiredZ) {
+      localPos.z = requiredZ;
+    }
+  }
+  return localPos;
 }
 
 /**
@@ -335,6 +353,14 @@ export class WeaponIKController {
 
   private adsBlend = 0;
   private sprintBlend = 0;
+
+  public getAdsBlend(): number {
+    return this.adsBlend;
+  }
+
+  public getSprintBlend(): number {
+    return this.sprintBlend;
+  }
 
   constructor(rig: CharacterRig) {
     this.rig = rig;
@@ -686,15 +712,16 @@ export class WeaponIKController {
       }
     }
 
-    // Apply live spring-damper recoil directly onto weapon & shoulder
+    // Apply live spring-damper recoil directly onto weapon & shoulder + runtime chest clearance clamp
     const finalLocalPos = new THREE.Vector3(
       posX + inspectOffX + reloadOffX,
       posY + drawOffsetY + inspectOffY + reloadOffY + state.recoilPitch * 0.035,
       posZ + inspectOffZ + reloadOffZ - state.recoilZ
     );
+    ensureChestClearance(finalLocalPos, this.sprintBlend, 0.28);
 
     _eA.set(
-      rotX + drawRotX + reloadTiltX - state.recoilPitch + aimPitch * 0.28,
+      rotX + drawRotX + reloadTiltX - state.recoilPitch + aimPitch * 0.16,
       rotY + reloadTiltY + state.recoilYaw,
       rotZ + reloadTiltZ,
       'YXZ'
@@ -1185,12 +1212,16 @@ export class WeaponIKController {
     this.solveArmWorld('L', wristLTarget, elbowLPole, handLTargetQuat);
     this.setFingerGripPose('L', leftGripCurl, 0, false, leftThumbCurl);
 
-    // Subtle cheek-weld head tilt toward optic during ADS
+    // Subtle disciplined cheek-weld roll toward optic during ADS (never twists neck backwards!)
     if (this.adsBlend > 0.02) {
-      _eA.set(0.04 * this.adsBlend, -0.08 * this.adsBlend, -0.14 * this.adsBlend, 'YXZ');
+      _eA.set(0.015 * this.adsBlend, -0.04 * this.adsBlend, -0.08 * this.adsBlend, 'YXZ');
       _qC.setFromEuler(_eA);
       head.quaternion.multiply(_qC);
       head.updateMatrixWorld(true);
     }
+
+    // Drive upperarm_twist_01_l/r and lowerarm_twist_01_l/r at 0.5 * axial roll for smooth forearms
+    this.rig.updateTwistBones();
+    this.rig.rootBone.updateMatrixWorld(true);
   }
 }

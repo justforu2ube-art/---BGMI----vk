@@ -383,6 +383,7 @@ export class CombatFXSystem {
     this.scene = scene;
     this.fxGroup = new THREE.Group();
     this.fxGroup.name = 'Combat_VFX_Group';
+    this.fxGroup.userData.excludeFromGLB = true;
     this.scene.add(this.fxGroup);
 
     // 1. Multi-card HDR Muzzle Flash
@@ -455,46 +456,56 @@ export class CombatFXSystem {
       depthWrite: false,
     });
 
-    // 5. Tactical Red Laser Beam & Dot
-    const laserGeo = new THREE.CylinderGeometry(0.0014, 0.0014, 14, 6);
+    // 5. Tactical Red Laser Beam & Dot — pre-baked strictly from z = 0 to z = 1 so scaling Z hits exact crosshair distance!
+    const laserGeo = new THREE.CylinderGeometry(0.0012, 0.0012, 1, 6);
     laserGeo.rotateX(Math.PI / 2);
-    laserGeo.translate(0, 0, 7);
+    laserGeo.translate(0, 0, 0.5);
     const laserMat = new THREE.MeshBasicMaterial({
       color: 0xff1e1e,
       transparent: true,
-      opacity: 0.62,
+      opacity: 0.68,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
     });
     this.laserBeam = new THREE.Mesh(laserGeo, laserMat);
+    this.laserBeam.name = 'Tactical_Laser_Beam';
+    this.laserBeam.userData.excludeFromGLB = true;
     this.laserBeam.visible = false;
     this.fxGroup.add(this.laserBeam);
 
     this.laserDot = new THREE.Mesh(
-      new THREE.SphereGeometry(0.012, 8, 8),
+      new THREE.SphereGeometry(0.011, 8, 8),
       new THREE.MeshBasicMaterial({ color: 0xff3b30 })
     );
+    this.laserDot.name = 'Tactical_Laser_Dot';
+    this.laserDot.userData.excludeFromGLB = true;
     this.laserDot.visible = false;
     this.fxGroup.add(this.laserDot);
 
-    // 6. Glock Tactical Weapon Flashlight Beam Cone + SpotLight
-    const coneGeo = new THREE.ConeGeometry(0.48, 3.6, 16, 1, true);
+    // 6. Glock Tactical Weaponlight Cone Helper (hidden when adsBlend > 0.70) + Pooled 22m SpotLight on weapon_light_socket
+    const coneGeo = new THREE.ConeGeometry(0.42, 3.2, 16, 1, true);
     coneGeo.rotateX(-Math.PI / 2);
-    coneGeo.translate(0, 0, 1.8);
+    coneGeo.translate(0, 0, 1.6);
     const coneMat = new THREE.MeshBasicMaterial({
       color: 0xfff5dc,
       transparent: true,
-      opacity: 0.11,
+      opacity: 0.09,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       side: THREE.DoubleSide,
     });
     this.flashlightCone = new THREE.Mesh(coneGeo, coneMat);
+    this.flashlightCone.name = 'Weaponlight_Volumetric_Cone';
+    this.flashlightCone.userData.isLensHelper = true;
+    this.flashlightCone.userData.excludeFromGLB = true;
     this.flashlightCone.visible = false;
     this.fxGroup.add(this.flashlightCone);
 
-    this.flashlightSpot = new THREE.SpotLight(0xfff6e2, 0, 9, Math.PI * 0.16, 0.55, 1.8);
+    this.flashlightSpot = new THREE.SpotLight(0xfff6e2, 0, 22, 0.42, 0.5, 1.5);
+    this.flashlightSpot.name = 'Weaponlight_SpotLight';
+    this.flashlightSpot.userData.excludeFromGLB = true;
     this.flashlightTarget = new THREE.Object3D();
+    this.flashlightTarget.userData.excludeFromGLB = true;
     this.flashlightSpot.target = this.flashlightTarget;
     this.fxGroup.add(this.flashlightSpot, this.flashlightTarget);
   }
@@ -656,8 +667,18 @@ export class CombatFXSystem {
     activeWeapon: BuiltWeapon | null,
     activeWeaponId: WeaponId | 'none',
     muzzleFlashTimer: number,
-    laserEnabled: boolean
+    laserEnabled: boolean,
+    opts?: {
+      adsBlend?: number;
+      hideLaser?: boolean;
+      nightOp?: boolean;
+      aimTargetWorld?: THREE.Vector3;
+    }
   ): void {
+    const adsBlend = opts?.adsBlend ?? 0;
+    const hideLaser = opts?.hideLaser ?? false;
+    const nightOp = opts?.nightOp ?? false;
+
     // 1. Fade HDR muzzle flash & warm light
     if (muzzleFlashTimer > 0 && activeWeapon) {
       activeWeapon.muzzleTip.getWorldPosition(this._v1);
@@ -673,30 +694,55 @@ export class CombatFXSystem {
       this.flashLight.intensity = 0;
     }
 
-    // 2. Update tactical laser / pistol flashlight (`L` toggle)
-    if (laserEnabled && activeWeapon && activeWeaponId !== 'none') {
+    // 2. Update tactical laser / pooled 22m weaponlight SpotLight after skeleton.updateMatrixWorld(true)
+    if (activeWeapon && activeWeaponId !== 'none' && !hideLaser) {
       const spec = WEAPON_SPECS[activeWeaponId];
-      activeWeapon.laserOrigin.getWorldPosition(this._v2);
+      activeWeapon.root.updateMatrixWorld(true);
       activeWeapon.root.getWorldQuaternion(this._q1);
       const fwd = this._v3.set(0, 0, 1).applyQuaternion(this._q1).normalize();
 
-      if (spec.hasFlashlight) {
-        this.laserBeam.visible = false;
-        this.laserDot.visible = false;
-        this.flashlightCone.visible = true;
-        this.flashlightCone.position.copy(this._v2);
-        this.flashlightCone.quaternion.copy(this._q1);
+      // Pooled 22m SpotLight on weapon_light_socket: active on Night Operation or when Glock weaponlight toggled
+      const spotOn = (spec.hasFlashlight && laserEnabled) || nightOp;
+      if (spotOn) {
+        activeWeapon.weaponLightSocket.getWorldPosition(this._v2);
         this.flashlightSpot.position.copy(this._v2);
-        this.flashlightTarget.position.copy(this._v2).addScaledVector(fwd, 4.5);
-        this.flashlightSpot.intensity = 16;
+        const lightTarget = opts?.aimTargetWorld
+          ? opts.aimTargetWorld
+          : this._v1.copy(this._v2).addScaledVector(fwd, 12);
+        this.flashlightTarget.position.copy(lightTarget);
+        this.flashlightSpot.intensity = nightOp ? 28 : 18;
+
+        // Hide translucent volumetric cone helper when adsBlend > 0.70 so zero disc floats over crosshair!
+        const showCone = spec.hasFlashlight && laserEnabled && adsBlend <= 0.70;
+        this.flashlightCone.visible = showCone;
+        if (showCone) {
+          this.flashlightCone.position.copy(this._v2);
+          this.flashlightCone.quaternion.copy(this._q1);
+        }
       } else {
         this.flashlightCone.visible = false;
         this.flashlightSpot.intensity = 0;
+      }
+
+      // Crosshair-converged barrel laser beam (pre-baked z=0..1, scaled to exact raycast hit distance!)
+      if (laserEnabled && !spec.hasFlashlight) {
+        activeWeapon.laserSocket.getWorldPosition(this._v2);
+        const targetPt = opts?.aimTargetWorld
+          ? this._v1.copy(opts.aimTargetWorld)
+          : this._v1.copy(this._v2).addScaledVector(fwd, 14);
+        const dist = Math.max(0.25, Math.min(28, this._v2.distanceTo(targetPt)));
+        const dir = this._v3.copy(targetPt).sub(this._v2).normalize();
+
         this.laserBeam.visible = true;
         this.laserBeam.position.copy(this._v2);
-        this.laserBeam.quaternion.copy(this._q1);
+        this.laserBeam.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir);
+        this.laserBeam.scale.set(1, 1, dist);
+
         this.laserDot.visible = true;
-        this.laserDot.position.copy(this._v2).addScaledVector(fwd, 9.5);
+        this.laserDot.position.copy(this._v2).addScaledVector(dir, dist);
+      } else {
+        this.laserBeam.visible = false;
+        this.laserDot.visible = false;
       }
     } else {
       this.laserBeam.visible = false;

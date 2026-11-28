@@ -1,538 +1,510 @@
 import * as THREE from 'three';
+import type { UE5BoneName, UE5SocketName } from '../types/studioTypes';
 
 export interface BoneDef {
-  name: string;
-  parent: string | null;
-  /** World-space bind position in meters (Y=0 is floor, character faces +Z, height = 1.85m) */
-  worldPos: [number, number, number];
+  name: UE5BoneName;
+  parent: UE5BoneName | null;
+  pos: [number, number, number];
 }
-
-export interface BoneSegment {
-  boneIndex: number;
-  boneName: string;
-  a: THREE.Vector3;
-  b: THREE.Vector3;
-  radius: number;
-  region: SkinRegion;
-}
-
-export type SkinRegion =
-  | 'head'
-  | 'eye_l'
-  | 'eye_r'
-  | 'torso'
-  | 'arm_l'
-  | 'arm_r'
-  | 'hand_l'
-  | 'hand_r'
-  | 'leg_l'
-  | 'leg_r'
-  | 'foot_l'
-  | 'foot_r'
-  | 'auto';
 
 /**
- * Heroic 1.85m male commando humanoid skeleton (55 bones total).
- * Facing +Z, +Y up, +X is character's LEFT (_L), -X is character's RIGHT (_R).
- * Soles sit flush at Y = 0.000, crown of hair reaches Y = 1.850.
+ * 63-Bone UE5 IK_Mannequin Hierarchy (Right-handed Y-up, +Z forward, meters, 1.87m hero scale):
+ *  - Core (7): root (0,0,0) -> pelvis -> spine_01..03 -> neck_01 -> head
+ *  - Arms + Twist (12): clavicle_l/r, upperarm_l/r, upperarm_twist_01_l/r,
+ *                       lowerarm_l/r, lowerarm_twist_01_l/r, hand_l/r
+ *  - Fingers (30): thumb/index/middle/ring/pinky_01..03_l/r (Finger_Humanoid)
+ *  - Legs + Twist (12): thigh_l/r, thigh_twist_01_l/r, calf_l/r, calf_twist_01_l/r, foot_l/r, ball_l/r
+ *  - IK Roots (2): ik_hand_root, ik_foot_root
  */
-function buildFingerDefs(side: 'L' | 'R'): BoneDef[] {
-  const s = side === 'L' ? 1 : -1;
-  // Hand_L world bind pos: (+0.538, 1.045, 0.018)
-  // Arm A-pose direction vector from Forearm to Hand:
-  // Forearm_L: (+0.382, 1.248, -0.014) -> Hand_L: (+0.538, 1.045, 0.018)
-  // Unit arm dir: normalize(0.156, -0.203, 0.032) ≈ (0.604, -0.786, 0.124)
-  // Palm normal (outward back of hand): roughly (+0.78, +0.60, 0.0)
-  // Forward direction along palm width (thumb toward +Z, pinky toward -Z)
-  const hx = 0.538 * s;
-  const hy = 1.045;
-  const hz = 0.018;
+export const BONE_DEFS: BoneDef[] = [
+  // Core (7)
+  { name: 'root', parent: null, pos: [0, 0, 0] },
+  { name: 'pelvis', parent: 'root', pos: [0, 0.97, 0] },
+  { name: 'spine_01', parent: 'pelvis', pos: [0, 1.07, 0.004] },
+  { name: 'spine_02', parent: 'spine_01', pos: [0, 1.21, 0.002] },
+  { name: 'spine_03', parent: 'spine_02', pos: [0, 1.38, 0.0] },
+  { name: 'neck_01', parent: 'spine_03', pos: [0, 1.545, -0.008] },
+  { name: 'head', parent: 'neck_01', pos: [0, 1.645, 0.002] },
 
-  // Hand local basis in world space (A-pose, palms angled inward toward thighs)
-  const along = new THREE.Vector3(0.58 * s, -0.80, 0.14).normalize();
-  const forward = new THREE.Vector3(-0.14 * s, 0.05, 0.99).normalize();
-  const out = new THREE.Vector3().crossVectors(forward, along).multiplyScalar(s).normalize();
-  // Ensure out points away from torso (+X for L, -X for R)
-  if (out.x * s < 0) out.negate();
+  // Left Arm + Twist (6)
+  { name: 'clavicle_l', parent: 'spine_03', pos: [0.06, 1.485, 0.005] },
+  { name: 'upperarm_l', parent: 'clavicle_l', pos: [0.195, 1.47, -0.01] },
+  { name: 'upperarm_twist_01_l', parent: 'upperarm_l', pos: [0.325, 1.448, -0.016] },
+  { name: 'lowerarm_l', parent: 'upperarm_l', pos: [0.46, 1.425, -0.022] },
+  { name: 'lowerarm_twist_01_l', parent: 'lowerarm_l', pos: [0.585, 1.404, -0.015] },
+  { name: 'hand_l', parent: 'lowerarm_l', pos: [0.715, 1.382, -0.008] },
 
-  const pt = (a: number, f: number, o: number): [number, number, number] => [
-    hx + along.x * a + forward.x * f + out.x * o,
-    hy + along.y * a + forward.y * f + out.y * o,
-    hz + along.z * a + forward.z * f + out.z * o,
-  ];
+  // Left Fingers (15)
+  { name: 'thumb_01_l', parent: 'hand_l', pos: [0.742, 1.372, 0.024] },
+  { name: 'thumb_02_l', parent: 'thumb_01_l', pos: [0.768, 1.356, 0.045] },
+  { name: 'thumb_03_l', parent: 'thumb_02_l', pos: [0.790, 1.344, 0.062] },
+  { name: 'index_01_l', parent: 'hand_l', pos: [0.795, 1.380, 0.026] },
+  { name: 'index_02_l', parent: 'index_01_l', pos: [0.830, 1.377, 0.027] },
+  { name: 'index_03_l', parent: 'index_02_l', pos: [0.858, 1.374, 0.028] },
+  { name: 'middle_01_l', parent: 'hand_l', pos: [0.798, 1.382, 0.004] },
+  { name: 'middle_02_l', parent: 'middle_01_l', pos: [0.836, 1.379, 0.004] },
+  { name: 'middle_03_l', parent: 'middle_02_l', pos: [0.868, 1.376, 0.004] },
+  { name: 'ring_01_l', parent: 'hand_l', pos: [0.794, 1.380, -0.018] },
+  { name: 'ring_02_l', parent: 'ring_01_l', pos: [0.829, 1.377, -0.018] },
+  { name: 'ring_03_l', parent: 'ring_02_l', pos: [0.858, 1.374, -0.018] },
+  { name: 'pinky_01_l', parent: 'hand_l', pos: [0.788, 1.377, -0.038] },
+  { name: 'pinky_02_l', parent: 'pinky_01_l', pos: [0.816, 1.374, -0.039] },
+  { name: 'pinky_03_l', parent: 'pinky_02_l', pos: [0.840, 1.371, -0.039] },
 
-  const defs: BoneDef[] = [
-    // Thumb (3 phalanges)
-    { name: `Thumb_01_${side}`, parent: `Hand_${side}`, worldPos: pt(0.028, 0.032, -0.006) },
-    { name: `Thumb_02_${side}`, parent: `Thumb_01_${side}`, worldPos: pt(0.056, 0.052, -0.012) },
-    { name: `Thumb_03_${side}`, parent: `Thumb_02_${side}`, worldPos: pt(0.082, 0.064, -0.016) },
-    // Index (3 phalanges)
-    { name: `Index_01_${side}`, parent: `Hand_${side}`, worldPos: pt(0.088, 0.030, 0.004) },
-    { name: `Index_02_${side}`, parent: `Index_01_${side}`, worldPos: pt(0.124, 0.030, 0.001) },
-    { name: `Index_03_${side}`, parent: `Index_02_${side}`, worldPos: pt(0.151, 0.030, -0.003) },
-    // Middle (3 phalanges)
-    { name: `Middle_01_${side}`, parent: `Hand_${side}`, worldPos: pt(0.092, 0.009, 0.006) },
-    { name: `Middle_02_${side}`, parent: `Middle_01_${side}`, worldPos: pt(0.132, 0.009, 0.002) },
-    { name: `Middle_03_${side}`, parent: `Middle_02_${side}`, worldPos: pt(0.161, 0.009, -0.003) },
-    // Ring (3 phalanges)
-    { name: `Ring_01_${side}`, parent: `Hand_${side}`, worldPos: pt(0.088, -0.012, 0.005) },
-    { name: `Ring_02_${side}`, parent: `Ring_01_${side}`, worldPos: pt(0.124, -0.012, 0.001) },
-    { name: `Ring_03_${side}`, parent: `Ring_02_${side}`, worldPos: pt(0.150, -0.012, -0.003) },
-    // Pinky (3 phalanges)
-    { name: `Pinky_01_${side}`, parent: `Hand_${side}`, worldPos: pt(0.081, -0.031, 0.002) },
-    { name: `Pinky_02_${side}`, parent: `Pinky_01_${side}`, worldPos: pt(0.109, -0.031, -0.001) },
-    { name: `Pinky_03_${side}`, parent: `Pinky_02_${side}`, worldPos: pt(0.131, -0.031, -0.005) },
-  ];
+  // Right Arm + Twist (6)
+  { name: 'clavicle_r', parent: 'spine_03', pos: [-0.06, 1.485, 0.005] },
+  { name: 'upperarm_r', parent: 'clavicle_r', pos: [-0.195, 1.47, -0.01] },
+  { name: 'upperarm_twist_01_r', parent: 'upperarm_r', pos: [-0.325, 1.448, -0.016] },
+  { name: 'lowerarm_r', parent: 'upperarm_r', pos: [-0.46, 1.425, -0.022] },
+  { name: 'lowerarm_twist_01_r', parent: 'lowerarm_r', pos: [-0.585, 1.404, -0.015] },
+  { name: 'hand_r', parent: 'lowerarm_r', pos: [-0.715, 1.382, -0.008] },
 
-  return defs;
+  // Right Fingers (15)
+  { name: 'thumb_01_r', parent: 'hand_r', pos: [-0.742, 1.372, 0.024] },
+  { name: 'thumb_02_r', parent: 'thumb_01_r', pos: [-0.768, 1.356, 0.045] },
+  { name: 'thumb_03_r', parent: 'thumb_02_r', pos: [-0.790, 1.344, 0.062] },
+  { name: 'index_01_r', parent: 'hand_r', pos: [-0.795, 1.380, 0.026] },
+  { name: 'index_02_r', parent: 'index_01_r', pos: [-0.830, 1.377, 0.027] },
+  { name: 'index_03_r', parent: 'index_02_r', pos: [-0.858, 1.374, 0.028] },
+  { name: 'middle_01_r', parent: 'hand_r', pos: [-0.798, 1.382, 0.004] },
+  { name: 'middle_02_r', parent: 'middle_01_r', pos: [-0.836, 1.379, 0.004] },
+  { name: 'middle_03_r', parent: 'middle_02_r', pos: [-0.868, 1.376, 0.004] },
+  { name: 'ring_01_r', parent: 'hand_r', pos: [-0.794, 1.380, -0.018] },
+  { name: 'ring_02_r', parent: 'ring_01_r', pos: [-0.829, 1.377, -0.018] },
+  { name: 'ring_03_r', parent: 'ring_02_r', pos: [-0.858, 1.374, -0.018] },
+  { name: 'pinky_01_r', parent: 'hand_r', pos: [-0.788, 1.377, -0.038] },
+  { name: 'pinky_02_r', parent: 'pinky_01_r', pos: [-0.816, 1.374, -0.039] },
+  { name: 'pinky_03_r', parent: 'pinky_02_r', pos: [-0.840, 1.371, -0.039] },
+
+  // Left Leg + Twist (6)
+  { name: 'thigh_l', parent: 'pelvis', pos: [0.105, 0.915, 0.0] },
+  { name: 'thigh_twist_01_l', parent: 'thigh_l', pos: [0.104, 0.715, 0.008] },
+  { name: 'calf_l', parent: 'thigh_l', pos: [0.102, 0.505, 0.014] },
+  { name: 'calf_twist_01_l', parent: 'calf_l', pos: [0.102, 0.305, 0.004] },
+  { name: 'foot_l', parent: 'calf_l', pos: [0.102, 0.105, -0.012] },
+  { name: 'ball_l', parent: 'foot_l', pos: [0.102, 0.025, 0.115] },
+
+  // Right Leg + Twist (6)
+  { name: 'thigh_r', parent: 'pelvis', pos: [-0.105, 0.915, 0.0] },
+  { name: 'thigh_twist_01_r', parent: 'thigh_r', pos: [-0.104, 0.715, 0.008] },
+  { name: 'calf_r', parent: 'thigh_r', pos: [-0.102, 0.505, 0.014] },
+  { name: 'calf_twist_01_r', parent: 'calf_r', pos: [-0.102, 0.305, 0.004] },
+  { name: 'foot_r', parent: 'calf_r', pos: [-0.102, 0.105, -0.012] },
+  { name: 'ball_r', parent: 'foot_r', pos: [-0.102, 0.025, 0.115] },
+
+  // UE5 IK Root Chains (2)
+  { name: 'ik_hand_root', parent: 'root', pos: [0, 0, 0] },
+  { name: 'ik_foot_root', parent: 'root', pos: [0, 0, 0] },
+];
+
+export const BONE_NAME_TO_INDEX: Record<string, number> = Object.fromEntries(
+  BONE_DEFS.map((b, i) => [b.name, i])
+);
+
+export const LEGACY_BONE_ALIASES: Record<string, UE5BoneName> = {
+  Root: 'root',
+  Pelvis: 'pelvis',
+  Spine1: 'spine_01',
+  Spine2: 'spine_02',
+  Chest: 'spine_03',
+  Neck: 'neck_01',
+  Head: 'head',
+  Clavicle_L: 'clavicle_l',
+  UpperArm_L: 'upperarm_l',
+  Forearm_L: 'lowerarm_l',
+  Hand_L: 'hand_l',
+  Clavicle_R: 'clavicle_r',
+  UpperArm_R: 'upperarm_r',
+  Forearm_R: 'lowerarm_r',
+  Hand_R: 'hand_r',
+  Thigh_L: 'thigh_l',
+  Shin_L: 'calf_l',
+  Foot_L: 'foot_l',
+  Toe_L: 'ball_l',
+  Thigh_R: 'thigh_r',
+  Shin_R: 'calf_r',
+  Foot_R: 'foot_r',
+  Toe_R: 'ball_r',
+};
+
+export function resolveBoneName(name: string): UE5BoneName {
+  if (name in BONE_NAME_TO_INDEX) return name as UE5BoneName;
+  if (name in LEGACY_BONE_ALIASES) return LEGACY_BONE_ALIASES[name];
+  // Map legacy Finger_01_L or Finger1_L -> finger_01_l
+  const m1 = /^(Thumb|Index|Middle|Ring|Pinky)_0([123])_([LR])$/.exec(name);
+  if (m1) {
+    return `${m1[1].toLowerCase()}_0${m1[2]}_${m1[3].toLowerCase()}` as UE5BoneName;
+  }
+  const m2 = /^(Thumb|Index|Middle|Ring|Pinky)([123])_([LR])$/.exec(name);
+  if (m2) {
+    return `${m2[1].toLowerCase()}_0${m2[2]}_${m2[3].toLowerCase()}` as UE5BoneName;
+  }
+  return name as UE5BoneName;
 }
 
-export const BONE_DEFS: BoneDef[] = [
-  // Core spine & head
-  { name: 'Root', parent: null, worldPos: [0, 0, 0] },
-  { name: 'Pelvis', parent: 'Root', worldPos: [0, 0.965, 0] },
-  { name: 'Spine_01', parent: 'Pelvis', worldPos: [0, 1.080, 0.002] },
-  { name: 'Spine_02', parent: 'Spine_01', worldPos: [0, 1.215, 0.004] },
-  { name: 'Chest', parent: 'Spine_02', worldPos: [0, 1.370, 0.005] },
-  { name: 'Neck', parent: 'Chest', worldPos: [0, 1.545, 0.006] },
-  { name: 'Head', parent: 'Neck', worldPos: [0, 1.638, 0.014] },
-  { name: 'Jaw', parent: 'Head', worldPos: [0, 1.630, 0.044] },
-  { name: 'Eye_L', parent: 'Head', worldPos: [0.0295, 1.728, 0.090] },
-  { name: 'Eye_R', parent: 'Head', worldPos: [-0.0295, 1.728, 0.090] },
-
-  // Left arm (+X)
-  { name: 'Clavicle_L', parent: 'Chest', worldPos: [0.055, 1.500, 0.014] },
-  { name: 'UpperArm_L', parent: 'Clavicle_L', worldPos: [0.198, 1.482, 0.002] },
-  { name: 'Forearm_L', parent: 'UpperArm_L', worldPos: [0.382, 1.248, -0.014] },
-  { name: 'Hand_L', parent: 'Forearm_L', worldPos: [0.538, 1.045, 0.018] },
-  ...buildFingerDefs('L'),
-
-  // Right arm (-X)
-  { name: 'Clavicle_R', parent: 'Chest', worldPos: [-0.055, 1.500, 0.014] },
-  { name: 'UpperArm_R', parent: 'Clavicle_R', worldPos: [-0.198, 1.482, 0.002] },
-  { name: 'Forearm_R', parent: 'UpperArm_R', worldPos: [-0.382, 1.248, -0.014] },
-  { name: 'Hand_R', parent: 'Forearm_R', worldPos: [-0.538, 1.045, 0.018] },
-  ...buildFingerDefs('R'),
-
-  // Left leg (+X)
-  { name: 'Thigh_L', parent: 'Pelvis', worldPos: [0.105, 0.920, 0.002] },
-  { name: 'Calf_L', parent: 'Thigh_L', worldPos: [0.112, 0.490, 0.012] },
-  { name: 'Foot_L', parent: 'Calf_L', worldPos: [0.116, 0.088, -0.012] },
-  { name: 'Toe_L', parent: 'Foot_L', worldPos: [0.116, 0.028, 0.132] },
-
-  // Right leg (-X)
-  { name: 'Thigh_R', parent: 'Pelvis', worldPos: [-0.105, 0.920, 0.002] },
-  { name: 'Calf_R', parent: 'Thigh_R', worldPos: [-0.112, 0.490, 0.012] },
-  { name: 'Foot_R', parent: 'Calf_R', worldPos: [-0.116, 0.088, -0.012] },
-  { name: 'Toe_R', parent: 'Foot_R', worldPos: [-0.116, 0.028, 0.132] },
-];
+class AliasLookupMap<V> extends Map<string, V> {
+  public override get(key: string): V | undefined {
+    const direct = super.get(key);
+    if (direct !== undefined) return direct;
+    const resolved = resolveBoneName(key);
+    return super.get(resolved);
+  }
+  public override has(key: string): boolean {
+    if (super.has(key)) return true;
+    return super.has(resolveBoneName(key));
+  }
+}
 
 export interface CharacterRig {
   rootBone: THREE.Bone;
   bones: THREE.Bone[];
   boneMap: Map<string, THREE.Bone>;
-  boneIndexMap: Map<string, number>;
-  skeleton: THREE.Skeleton;
   bindWorldPos: Map<string, THREE.Vector3>;
-  segments: BoneSegment[];
+  skeleton: THREE.Skeleton;
+  restWorldPositions: Record<string, THREE.Vector3>;
+  sockets: Record<UE5SocketName, THREE.Object3D>;
+  getBone: (name: string) => THREE.Bone | undefined;
+  updateTwistBones: () => void;
+}
+
+/**
+ * Anatomical orthonormal bind basis for Hand_L / Hand_R:
+ * - `along`: points from wrist toward fingertips (+X on L, -X on R)
+ * - `forward`: points toward thumb / index front side (+Z)
+ * - `out`: points outward from the dorsal back of the hand (+Y), so palm faces `-out`!
+ */
+export function getHandBasis(
+  side: 'L' | 'R',
+  rig?: CharacterRig
+): { along: THREE.Vector3; forward: THREE.Vector3; out: THREE.Vector3 } {
+  const s = side.toLowerCase();
+  let along: THREE.Vector3;
+  if (rig) {
+    const handPos = rig.restWorldPositions[`hand_${s}`];
+    const midPos = rig.restWorldPositions[`middle_01_${s}`];
+    along = midPos.clone().sub(handPos).normalize();
+  } else {
+    along = new THREE.Vector3(side === 'L' ? 1 : -1, -0.02, 0).normalize();
+  }
+
+  const refForward = new THREE.Vector3(0, 0, 1);
+  // Ensure strict orthonormal right-handed frame with `out` pointing dorsal (+Y)
+  const out = new THREE.Vector3()
+    .crossVectors(side === 'L' ? refForward : along, side === 'L' ? along : refForward)
+    .normalize();
+  if (out.y < 0) out.negate();
+  const forward = new THREE.Vector3()
+    .crossVectors(side === 'L' ? along : out, side === 'L' ? out : along)
+    .normalize();
+  if (forward.z < 0) forward.negate();
+
+  return { along, forward, out };
 }
 
 export function createCharacterRig(): CharacterRig {
   const bones: THREE.Bone[] = [];
-  const boneMap = new Map<string, THREE.Bone>();
-  const boneIndexMap = new Map<string, number>();
-  const bindWorldPos = new Map<string, THREE.Vector3>();
+  const boneMap = new AliasLookupMap<THREE.Bone>();
+  const bindWorldPos = new AliasLookupMap<THREE.Vector3>();
+  const restWorldPositions: Record<string, THREE.Vector3> = {};
 
-  for (let i = 0; i < BONE_DEFS.length; i++) {
-    const def = BONE_DEFS[i];
+  for (const def of BONE_DEFS) {
     const bone = new THREE.Bone();
     bone.name = def.name;
-    const wp = new THREE.Vector3(...def.worldPos);
-    bindWorldPos.set(def.name, wp);
-
-    if (def.parent === null) {
-      bone.position.copy(wp);
-    } else {
-      const parentBone = boneMap.get(def.parent);
-      const parentWp = bindWorldPos.get(def.parent);
-      if (!parentBone || !parentWp) {
-        throw new Error(`Missing parent bone ${def.parent} for ${def.name}`);
-      }
-      bone.position.copy(wp).sub(parentWp);
-      parentBone.add(bone);
-    }
-
     bones.push(bone);
     boneMap.set(def.name, bone);
-    boneIndexMap.set(def.name, i);
+    const v = new THREE.Vector3(...def.pos);
+    restWorldPositions[def.name] = v;
+    bindWorldPos.set(def.name, v.clone());
   }
 
-  const rootBone = bones[0];
-  rootBone.updateMatrixWorld(true);
+  for (const def of BONE_DEFS) {
+    const bone = boneMap.get(def.name)!;
+    if (def.parent) {
+      const parentBone = boneMap.get(def.parent)!;
+      const pPos = restWorldPositions[def.parent];
+      const cPos = restWorldPositions[def.name];
+      bone.position.copy(cPos).sub(pPos);
+      parentBone.add(bone);
+    } else {
+      bone.position.set(...def.pos);
+    }
+  }
 
+  // Attach UE5 Sockets
+  const handRWeapon = new THREE.Object3D();
+  handRWeapon.name = 'hand_r_weapon';
+  handRWeapon.position.set(-0.04, -0.015, 0.015);
+  boneMap.get('hand_r')!.add(handRWeapon);
+
+  const thighHolster = new THREE.Object3D();
+  thighHolster.name = 'thigh_holster_socket';
+  thighHolster.position.set(-0.106, -0.17, 0.008);
+  boneMap.get('thigh_r')!.add(thighHolster);
+
+  const makeSocket = (name: UE5SocketName, parent: THREE.Object3D) => {
+    const s = new THREE.Object3D();
+    s.name = name;
+    parent.add(s);
+    return s;
+  };
+
+  const sockets: Record<UE5SocketName, THREE.Object3D> = {
+    hand_r_weapon: handRWeapon,
+    thigh_holster_socket: thighHolster,
+    muzzle_socket: makeSocket('muzzle_socket', handRWeapon),
+    laser_socket: makeSocket('laser_socket', handRWeapon),
+    optic_eye_socket: makeSocket('optic_eye_socket', handRWeapon),
+    ejection_port_socket: makeSocket('ejection_port_socket', handRWeapon),
+    weapon_light_socket: makeSocket('weapon_light_socket', handRWeapon),
+  };
+
+  const getBone = (name: string): THREE.Bone | undefined => boneMap.get(name);
+
+  const rootBone = boneMap.get('root')!;
+  rootBone.updateMatrixWorld(true);
   const skeleton = new THREE.Skeleton(bones);
-  const segments = buildBoneSegments(boneIndexMap, bindWorldPos);
+  skeleton.calculateInverses();
+
+  const _tmpEuler = new THREE.Euler(0, 0, 0, 'XYZ');
+  const _axisX = new THREE.Vector3(1, 0, 0);
+
+  /**
+   * Drive upperarm_twist_01_l/r and lowerarm_twist_01_l/r at 0.5 * axial roll
+   * so rolled-sleeve cuffs and bare forearms twist smoothly with zero pinch.
+   */
+  const updateTwistBones = () => {
+    for (const side of ['l', 'r'] as const) {
+      const upper = boneMap.get(`upperarm_${side}`);
+      const upperTwist = boneMap.get(`upperarm_twist_01_${side}`);
+      const lowerTwist = boneMap.get(`lowerarm_twist_01_${side}`);
+      const hand = boneMap.get(`hand_${side}`);
+
+      if (upper && upperTwist) {
+        _tmpEuler.setFromQuaternion(upper.quaternion, 'XYZ');
+        upperTwist.quaternion.setFromAxisAngle(_axisX, _tmpEuler.x * 0.5);
+      }
+      if (lowerTwist && hand) {
+        _tmpEuler.setFromQuaternion(hand.quaternion, 'XYZ');
+        const roll = THREE.MathUtils.clamp(_tmpEuler.x, -1.4, 1.4);
+        lowerTwist.quaternion.setFromAxisAngle(_axisX, roll * 0.5);
+      }
+    }
+  };
 
   return {
     rootBone,
     bones,
     boneMap,
-    boneIndexMap,
-    skeleton,
     bindWorldPos,
-    segments,
+    skeleton,
+    restWorldPositions,
+    sockets,
+    getBone,
+    updateTwistBones,
   };
 }
 
-function buildBoneSegments(
-  indexMap: Map<string, number>,
-  wp: Map<string, THREE.Vector3>
-): BoneSegment[] {
-  const segs: BoneSegment[] = [];
-  const add = (
-    boneName: string,
-    endNameOrOffset: string | [number, number, number],
-    radius: number,
-    region: SkinRegion
-  ) => {
-    const idx = indexMap.get(boneName);
-    const a = wp.get(boneName);
-    if (idx === undefined || !a) return;
-    let b: THREE.Vector3;
-    if (typeof endNameOrOffset === 'string') {
-      const endP = wp.get(endNameOrOffset);
-      if (!endP) return;
-      b = endP.clone();
-    } else {
-      b = a.clone().add(new THREE.Vector3(...endNameOrOffset));
+export interface BoneSegment {
+  bone: UE5BoneName;
+  a: THREE.Vector3;
+  b: THREE.Vector3;
+  radius: number;
+}
+
+export function buildBoneSegments(rig: CharacterRig): BoneSegment[] {
+  const p = (name: UE5BoneName) => rig.restWorldPositions[name].clone();
+  const segs: BoneSegment[] = [
+    { bone: 'pelvis', a: p('pelvis').add(new THREE.Vector3(0, -0.05, 0)), b: p('spine_01'), radius: 0.16 },
+    { bone: 'spine_01', a: p('spine_01'), b: p('spine_02'), radius: 0.15 },
+    { bone: 'spine_02', a: p('spine_02'), b: p('spine_03'), radius: 0.16 },
+    { bone: 'spine_03', a: p('spine_03'), b: p('neck_01'), radius: 0.18 },
+    { bone: 'neck_01', a: p('neck_01'), b: p('head'), radius: 0.07 },
+    { bone: 'head', a: p('head'), b: p('head').add(new THREE.Vector3(0, 0.22, 0)), radius: 0.14 },
+
+    // Left Arm + Twist
+    { bone: 'clavicle_l', a: p('clavicle_l'), b: p('upperarm_l'), radius: 0.085 },
+    { bone: 'upperarm_l', a: p('upperarm_l'), b: p('upperarm_twist_01_l'), radius: 0.068 },
+    { bone: 'upperarm_twist_01_l', a: p('upperarm_twist_01_l'), b: p('lowerarm_l'), radius: 0.062 },
+    { bone: 'lowerarm_l', a: p('lowerarm_l'), b: p('lowerarm_twist_01_l'), radius: 0.045 },
+    { bone: 'lowerarm_twist_01_l', a: p('lowerarm_twist_01_l'), b: p('hand_l'), radius: 0.045 },
+    { bone: 'hand_l', a: p('hand_l'), b: p('middle_01_l'), radius: 0.042 },
+
+    // Right Arm + Twist
+    { bone: 'clavicle_r', a: p('clavicle_r'), b: p('upperarm_r'), radius: 0.085 },
+    { bone: 'upperarm_r', a: p('upperarm_r'), b: p('upperarm_twist_01_r'), radius: 0.068 },
+    { bone: 'upperarm_twist_01_r', a: p('upperarm_twist_01_r'), b: p('lowerarm_r'), radius: 0.062 },
+    { bone: 'lowerarm_r', a: p('lowerarm_r'), b: p('lowerarm_twist_01_r'), radius: 0.045 },
+    { bone: 'lowerarm_twist_01_r', a: p('lowerarm_twist_01_r'), b: p('hand_r'), radius: 0.045 },
+    { bone: 'hand_r', a: p('hand_r'), b: p('middle_01_r'), radius: 0.042 },
+
+    // Left Leg + Twist
+    { bone: 'thigh_l', a: p('thigh_l'), b: p('thigh_twist_01_l'), radius: 0.11 },
+    { bone: 'thigh_twist_01_l', a: p('thigh_twist_01_l'), b: p('calf_l'), radius: 0.10 },
+    { bone: 'calf_l', a: p('calf_l'), b: p('calf_twist_01_l'), radius: 0.085 },
+    { bone: 'calf_twist_01_l', a: p('calf_twist_01_l'), b: p('foot_l'), radius: 0.075 },
+    { bone: 'foot_l', a: p('foot_l'), b: p('ball_l'), radius: 0.07 },
+    { bone: 'ball_l', a: p('ball_l'), b: p('ball_l').add(new THREE.Vector3(0, 0, 0.09)), radius: 0.055 },
+
+    // Right Leg + Twist
+    { bone: 'thigh_r', a: p('thigh_r'), b: p('thigh_twist_01_r'), radius: 0.11 },
+    { bone: 'thigh_twist_01_r', a: p('thigh_twist_01_r'), b: p('calf_r'), radius: 0.10 },
+    { bone: 'calf_r', a: p('calf_r'), b: p('calf_twist_01_r'), radius: 0.085 },
+    { bone: 'calf_twist_01_r', a: p('calf_twist_01_r'), b: p('foot_r'), radius: 0.075 },
+    { bone: 'foot_r', a: p('foot_r'), b: p('ball_r'), radius: 0.07 },
+    { bone: 'ball_r', a: p('ball_r'), b: p('ball_r').add(new THREE.Vector3(0, 0, 0.09)), radius: 0.055 },
+  ];
+
+  const fingerNames = ['thumb', 'index', 'middle', 'ring', 'pinky'] as const;
+  for (const side of ['l', 'r'] as const) {
+    const sign = side === 'l' ? 1 : -1;
+    for (const f of fingerNames) {
+      const b1 = `${f}_01_${side}` as UE5BoneName;
+      const b2 = `${f}_02_${side}` as UE5BoneName;
+      const b3 = `${f}_03_${side}` as UE5BoneName;
+      const tipOffset =
+        f === 'thumb'
+          ? new THREE.Vector3(sign * 0.022, -0.01, 0.014)
+          : new THREE.Vector3(sign * 0.028, -0.002, 0);
+      segs.push({ bone: b1, a: p(b1), b: p(b2), radius: 0.014 });
+      segs.push({ bone: b2, a: p(b2), b: p(b3), radius: 0.012 });
+      segs.push({ bone: b3, a: p(b3), b: p(b3).add(tipOffset), radius: 0.011 });
     }
-    segs.push({ boneIndex: idx, boneName, a: a.clone(), b, radius, region });
-  };
-
-  // Spine & Head
-  add('Pelvis', 'Spine_01', 0.16, 'torso');
-  add('Spine_01', 'Spine_02', 0.15, 'torso');
-  add('Spine_02', 'Chest', 0.165, 'torso');
-  add('Chest', 'Neck', 0.175, 'torso');
-  add('Neck', 'Head', 0.075, 'torso');
-  add('Head', [0, 0.19, 0], 0.12, 'head');
-
-  // Arms
-  for (const side of ['L', 'R'] as const) {
-    const s = side === 'L' ? 1 : -1;
-    const armReg: SkinRegion = side === 'L' ? 'arm_l' : 'arm_r';
-    const handReg: SkinRegion = side === 'L' ? 'hand_l' : 'hand_r';
-    add(`Clavicle_${side}`, `UpperArm_${side}`, 0.095, armReg);
-    add(`UpperArm_${side}`, `Forearm_${side}`, 0.085, armReg);
-    add(`Forearm_${side}`, `Hand_${side}`, 0.068, armReg);
-    add(`Hand_${side}`, [0.055 * s, -0.072, 0.012], 0.055, handReg);
-
-    // Fingers
-    const fingers = ['Thumb', 'Index', 'Middle', 'Ring', 'Pinky'] as const;
-    for (const f of fingers) {
-      const b1 = `${f}_01_${side}`;
-      const b2 = `${f}_02_${side}`;
-      const b3 = `${f}_03_${side}`;
-      add(b1, b2, 0.015, handReg);
-      add(b2, b3, 0.013, handReg);
-      const p2 = wp.get(b2)!;
-      const p3 = wp.get(b3)!;
-      const tipDir = p3.clone().sub(p2).normalize().multiplyScalar(0.024);
-      add(b3, [tipDir.x, tipDir.y, tipDir.z], 0.011, handReg);
-    }
-  }
-
-  // Legs
-  for (const side of ['L', 'R'] as const) {
-    const legReg: SkinRegion = side === 'L' ? 'leg_l' : 'leg_r';
-    const footReg: SkinRegion = side === 'L' ? 'foot_l' : 'foot_r';
-    add(`Thigh_${side}`, `Calf_${side}`, 0.115, legReg);
-    add(`Calf_${side}`, `Foot_${side}`, 0.085, legReg);
-    add(`Foot_${side}`, `Toe_${side}`, 0.078, footReg);
-    add(`Toe_${side}`, [0, -0.005, 0.075], 0.055, footReg);
   }
 
   return segs;
 }
 
-/** Distance from point P to segment AB, plus parameter t in [0, 1] */
-function pointToSegmentDistSq(
-  px: number,
-  py: number,
-  pz: number,
-  a: THREE.Vector3,
-  b: THREE.Vector3
-): number {
-  const abx = b.x - a.x;
-  const aby = b.y - a.y;
-  const abz = b.z - a.z;
-  const apx = px - a.x;
-  const apy = py - a.y;
-  const apz = pz - a.z;
-  const abLenSq = abx * abx + aby * aby + abz * abz;
-  let t = abLenSq > 1e-8 ? (apx * abx + apy * aby + apz * abz) / abLenSq : 0;
-  if (t < 0) t = 0;
-  else if (t > 1) t = 1;
-  const cx = a.x + abx * t - px;
-  const cy = a.y + aby * t - py;
-  const cz = a.z + abz * t - pz;
-  return cx * cx + cy * cy + cz * cz;
-}
-
-export interface SkinWeightOptions {
-  /** Lock all vertices strictly to one bone (e.g. Eye_L, Eye_R, Hair on Head) */
-  rigidBone?: string;
-  /** Restrict candidate bone names to prevent cross-limb bleeding */
-  allowedBones?: string[];
-  /** Sharpness exponent for smooth anatomical joint falloff (default 2.6) */
-  sharpness?: number;
+function distToSegment(pt: THREE.Vector3, a: THREE.Vector3, b: THREE.Vector3): number {
+  const ab = new THREE.Vector3().subVectors(b, a);
+  const ap = new THREE.Vector3().subVectors(pt, a);
+  const lenSq = ab.lengthSq();
+  const t = lenSq > 1e-8 ? THREE.MathUtils.clamp(ap.dot(ab) / lenSq, 0, 1) : 0;
+  const closest = a.clone().addScaledVector(ab, t);
+  return pt.distanceTo(closest);
 }
 
 /**
- * Computes smooth anatomical skinIndex (Uint16) and skinWeight (Float32) attributes
- * for any BufferGeometry in character bind space.
- * Guarantees strictly <= 4 non-zero weights per vertex, normalized to 1.0000.
+ * Pure smoothstep forearm/upperarm twist blending (smoothstep radius = 0.045m).
  */
-export function applySkinWeights(
-  geometry: THREE.BufferGeometry,
-  rig: CharacterRig,
-  options: SkinWeightOptions = {}
-): THREE.BufferGeometry {
-  const posAttr = geometry.attributes.position;
-  const vCount = posAttr.count;
-  const skinIndices = new Uint16Array(vCount * 4);
-  const skinWeights = new Float32Array(vCount * 4);
+export function computeSmoothstepTwistWeights(
+  xCoord: number,
+  jointStart: number,
+  jointMid: number,
+  jointEnd: number,
+  smoothRadius = 0.045
+): { wPrimary: number; wTwist: number } {
+  const s = Math.sign(jointEnd - jointStart) || 1;
+  const distFromMid = (xCoord - jointMid) * s;
+  const u = THREE.MathUtils.clamp((distFromMid + smoothRadius) / (2 * smoothRadius), 0, 1);
+  const wTwist = u * u * (3 - 2 * u);
+  return { wPrimary: 1 - wTwist, wTwist };
+}
 
-  if (options.rigidBone) {
-    const bIdx = rig.boneIndexMap.get(options.rigidBone);
-    if (bIdx === undefined) {
-      throw new Error(`Unknown rigidBone: ${options.rigidBone}`);
-    }
-    for (let i = 0; i < vCount; i++) {
-      const o = i * 4;
-      skinIndices[o] = bIdx;
-      skinIndices[o + 1] = 0;
-      skinIndices[o + 2] = 0;
-      skinIndices[o + 3] = 0;
-      skinWeights[o] = 1.0;
-      skinWeights[o + 1] = 0.0;
-      skinWeights[o + 2] = 0.0;
-      skinWeights[o + 3] = 0.0;
-    }
-    geometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(skinIndices, 4));
-    geometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWeights, 4));
-    return geometry;
-  }
+export function normalizeSkinWeightsOnGeometry(geo: THREE.BufferGeometry): THREE.BufferGeometry {
+  const idxAttr = geo.getAttribute('skinIndex');
+  const wAttr = geo.getAttribute('skinWeight');
+  if (!idxAttr || !wAttr) return geo;
 
-  const allowedSet = options.allowedBones ? new Set(options.allowedBones) : null;
-  const candidateSegs = allowedSet
-    ? rig.segments.filter((seg) => allowedSet.has(seg.boneName))
-    : rig.segments;
+  const count = idxAttr.count;
+  const idxArr = new Uint16Array(count * 4);
+  const wArr = new Float32Array(count * 4);
 
-  const sharpness = options.sharpness ?? 2.8;
-  const topIdx = [0, 0, 0, 0];
-  const topW = [0, 0, 0, 0];
-
-  for (let i = 0; i < vCount; i++) {
-    const px = posAttr.getX(i);
-    const py = posAttr.getY(i);
-    const pz = posAttr.getZ(i);
-
-    topIdx[0] = topIdx[1] = topIdx[2] = topIdx[3] = 0;
-    topW[0] = topW[1] = topW[2] = topW[3] = 0;
-
-    for (let s = 0; s < candidateSegs.length; s++) {
-      const seg = candidateSegs[s];
-      // Prevent cross-side bleeding between left and right legs or arms when auto-skinning
-      if (!allowedSet) {
-        if (seg.region === 'leg_l' && px < -0.008) continue;
-        if (seg.region === 'leg_r' && px > 0.008) continue;
-        if (seg.region === 'foot_l' && px < -0.005) continue;
-        if (seg.region === 'foot_r' && px > 0.005) continue;
-        if ((seg.region === 'arm_l' || seg.region === 'hand_l') && px < 0.08) continue;
-        if ((seg.region === 'arm_r' || seg.region === 'hand_r') && px > -0.08) continue;
-      }
-
-      const dSq = pointToSegmentDistSq(px, py, pz, seg.a, seg.b);
-      const normDist = Math.sqrt(dSq) / Math.max(seg.radius, 0.01);
-      // Smooth inverse-power falloff with soft joint blending zone
-      const w = 1.0 / Math.pow(0.12 + normDist * normDist, sharpness);
-
-      // Insert into top 4
-      if (w > topW[3]) {
-        let pos = 3;
-        while (pos > 0 && w > topW[pos - 1]) {
-          topW[pos] = topW[pos - 1];
-          topIdx[pos] = topIdx[pos - 1];
-          pos--;
-        }
-        topW[pos] = w;
-        topIdx[pos] = seg.boneIndex;
-      }
-    }
-
-    // Drop negligible micro-weights (< 3% of strongest) for cleaner deformation
-    const maxW = topW[0];
+  for (let i = 0; i < count; i++) {
     let sum = 0;
     for (let k = 0; k < 4; k++) {
-      if (topW[k] < maxW * 0.03) {
-        topW[k] = 0;
-        topIdx[k] = 0;
-      }
-      sum += topW[k];
+      const bi = Math.max(0, Math.min(BONE_DEFS.length - 1, Math.round(idxAttr.getComponent(i, k))));
+      const w = Math.max(0, wAttr.getComponent(i, k));
+      idxArr[i * 4 + k] = bi;
+      wArr[i * 4 + k] = w;
+      sum += w;
     }
-
-    const o = i * 4;
-    if (sum > 1e-8) {
-      let running = 0;
-      for (let k = 0; k < 4; k++) {
-        skinIndices[o + k] = topIdx[k];
-        if (k < 3) {
-          const nw = topW[k] / sum;
-          skinWeights[o + k] = nw;
-          running += nw;
-        } else {
-          skinWeights[o + k] = Math.max(0, 1.0 - running);
-        }
-      }
-      // Re-normalize exactly to float32 sum = 1.0
-      const exactSum =
-        skinWeights[o] + skinWeights[o + 1] + skinWeights[o + 2] + skinWeights[o + 3];
-      if (exactSum > 0) {
-        skinWeights[o] /= exactSum;
-        skinWeights[o + 1] /= exactSum;
-        skinWeights[o + 2] /= exactSum;
-        skinWeights[o + 3] /= exactSum;
-      }
+    if (sum > 1e-6) {
+      for (let k = 0; k < 4; k++) wArr[i * 4 + k] /= sum;
     } else {
-      skinIndices[o] = rig.boneIndexMap.get('Pelvis') ?? 1;
-      skinWeights[o] = 1.0;
+      wArr[i * 4] = 1;
     }
   }
 
-  geometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(skinIndices, 4));
-  geometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWeights, 4));
-  return geometry;
+  geo.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(idxArr, 4));
+  geo.setAttribute('skinWeight', new THREE.Float32BufferAttribute(wArr, 4));
+  return geo;
 }
 
-/**
- * Helper to create a properly bound SkinnedMesh with UE5/glTF-safe settings.
- */
-export function createBoundSkinnedMesh(
-  name: string,
-  geometry: THREE.BufferGeometry,
-  material: THREE.Material,
-  rig: CharacterRig
-): THREE.SkinnedMesh {
-  const mesh = new THREE.SkinnedMesh(geometry, material);
-  mesh.name = name;
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  mesh.frustumCulled = false;
-  mesh.bind(rig.skeleton, new THREE.Matrix4());
-  return mesh;
+export function skinRigidToBone(geo: THREE.BufferGeometry, boneName: string): THREE.BufferGeometry {
+  const resolved = resolveBoneName(boneName);
+  const idx = BONE_NAME_TO_INDEX[resolved] ?? 0;
+  const count = geo.attributes.position.count;
+  const skinIndices = new Uint16Array(count * 4);
+  const skinWeights = new Float32Array(count * 4);
+  for (let i = 0; i < count; i++) {
+    skinIndices[i * 4] = idx;
+    skinWeights[i * 4] = 1.0;
+  }
+  geo.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(skinIndices, 4));
+  geo.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWeights, 4));
+  return geo;
 }
 
-/**
- * Computes hand coordinate frame matching the bind-pose finger orientation.
- */
-export function getHandBasis(side: 'L' | 'R', rig: CharacterRig) {
-  const s = side === 'L' ? 1 : -1;
-  const handPos = rig.bindWorldPos.get(`Hand_${side}`)!.clone();
-  const along = new THREE.Vector3(0.58 * s, -0.80, 0.14).normalize();
-  const forward = new THREE.Vector3(-0.14 * s, 0.05, 0.99).normalize();
-  const out = new THREE.Vector3().crossVectors(forward, along).multiplyScalar(s).normalize();
-  if (out.x * s < 0) out.negate();
-  return { handPos, along, forward, out, s };
-}
-
-export interface GloveMcpJoint {
-  name: 'Pinky' | 'Ring' | 'Middle' | 'Index';
-  boneName: string;
-  worldPos: THREE.Vector3;
-  along: number;
-  forward: number;
-  out: number;
-}
-
-export interface GloveSkeletalAlignment {
-  side: 'L' | 'R';
-  handPos: THREE.Vector3;
-  along: THREE.Vector3;
-  forward: THREE.Vector3;
-  out: THREE.Vector3;
-  /** 4 MCP knuckles ordered ulnar-to-radial: Pinky -> Ring -> Middle -> Index */
-  mcpJoints: GloveMcpJoint[];
-  thumbMcpLocal: { along: number; forward: number; out: number };
-  meanMcpAlong: number;
-  meanMcpForward: number;
-  mcpSpanForward: number;
-  /** Dorsal back-of-hand cutout centered over the metacarpal arch proximal to the 4 MCP knuckles */
-  cutoutCenterLocal: { along: number; forward: number };
-  cutoutCenterWorld: THREE.Vector3;
-}
-
-/**
- * Computes exact skeletal alignment for the fingerless tactical glove dorsal cutout,
- * 4-knuckle impact armor crowns, and palm reinforcement pads directly from the hand rig's bones.
- */
-export function computeGloveSkeletalAlignment(
+export function skinSmoothToBones(
+  geo: THREE.BufferGeometry,
   rig: CharacterRig,
-  side: 'L' | 'R'
-): GloveSkeletalAlignment {
-  const { handPos, along, forward, out } = getHandBasis(side, rig);
-  const basisInv = new THREE.Matrix4().makeBasis(along, forward, out).invert();
+  allowedBones?: string[],
+  sharpness = 3.6
+): THREE.BufferGeometry {
+  const allSegs = buildBoneSegments(rig);
+  const resolvedAllowed = allowedBones ? new Set(allowedBones.map(resolveBoneName)) : null;
+  const segs = resolvedAllowed ? allSegs.filter((s) => resolvedAllowed.has(s.bone)) : allSegs;
 
-  const toLocal = (wp: THREE.Vector3) => {
-    const rel = wp.clone().sub(handPos).applyMatrix4(basisInv);
-    return { along: rel.x, forward: rel.y, out: rel.z };
-  };
+  const pos = geo.attributes.position;
+  const count = pos.count;
+  const skinIndices = new Uint16Array(count * 4);
+  const skinWeights = new Float32Array(count * 4);
+  const pt = new THREE.Vector3();
 
-  const mcpOrder: ('Pinky' | 'Ring' | 'Middle' | 'Index')[] = ['Pinky', 'Ring', 'Middle', 'Index'];
-  const mcpJoints: GloveMcpJoint[] = mcpOrder.map((name) => {
-    const boneName = `${name}_01_${side}`;
-    const worldPos = rig.bindWorldPos.get(boneName)!.clone();
-    const loc = toLocal(worldPos);
-    return {
-      name,
-      boneName,
-      worldPos,
-      along: loc.along,
-      forward: loc.forward,
-      out: loc.out,
-    };
-  });
+  for (let i = 0; i < count; i++) {
+    pt.fromBufferAttribute(pos, i);
+    const influences: Array<{ idx: number; w: number }> = [];
 
-  const thumbMcpLocal = toLocal(rig.bindWorldPos.get(`Thumb_01_${side}`)!);
+    for (const seg of segs) {
+      const d = distToSegment(pt, seg.a, seg.b);
+      const norm = d / Math.max(seg.radius, 0.01);
+      const w = Math.exp(-norm * norm * sharpness);
+      if (w > 0.0004) {
+        influences.push({ idx: BONE_NAME_TO_INDEX[seg.bone], w });
+      }
+    }
 
-  const meanMcpAlong =
-    mcpJoints.reduce((acc, j) => acc + j.along, 0) / mcpJoints.length;
-  const meanMcpForward =
-    mcpJoints.reduce((acc, j) => acc + j.forward, 0) / mcpJoints.length;
-  const mcpSpanForward =
-    mcpJoints[mcpJoints.length - 1].forward - mcpJoints[0].forward;
+    if (influences.length === 0) {
+      let bestIdx = 0;
+      let bestD = Infinity;
+      for (const seg of segs) {
+        const d = distToSegment(pt, seg.a, seg.b);
+        if (d < bestD) {
+          bestD = d;
+          bestIdx = BONE_NAME_TO_INDEX[seg.bone];
+        }
+      }
+      influences.push({ idx: bestIdx, w: 1 });
+    }
 
-  // Center dorsal cutout squarely over the metacarpal shaft valley between carpal wrist & MCP arch
-  const cutoutAlong = meanMcpAlong * 0.48;
-  const cutoutForward = meanMcpForward;
-  const cutoutCenterWorld = handPos
-    .clone()
-    .addScaledVector(along, cutoutAlong)
-    .addScaledVector(forward, cutoutForward)
-    .addScaledVector(out, 0.021);
+    influences.sort((a, b) => b.w - a.w);
+    const top = influences.slice(0, 4);
+    let sum = 0;
+    for (const t of top) sum += t.w;
+    if (sum < 1e-6) sum = 1;
 
-  return {
-    side,
-    handPos,
-    along,
-    forward,
-    out,
-    mcpJoints,
-    thumbMcpLocal,
-    meanMcpAlong,
-    meanMcpForward,
-    mcpSpanForward,
-    cutoutCenterLocal: { along: cutoutAlong, forward: cutoutForward },
-    cutoutCenterWorld,
-  };
+    for (let k = 0; k < 4; k++) {
+      if (k < top.length) {
+        skinIndices[i * 4 + k] = top[k].idx;
+        skinWeights[i * 4 + k] = top[k].w / sum;
+      } else {
+        skinIndices[i * 4 + k] = 0;
+        skinWeights[i * 4 + k] = 0;
+      }
+    }
+  }
+
+  geo.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(skinIndices, 4));
+  geo.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWeights, 4));
+  return normalizeSkinWeightsOnGeometry(geo);
 }

@@ -1,46 +1,99 @@
 import * as THREE from 'three';
-import { WeaponId, WEAPON_ORDER } from './weaponTypes';
-import { WeaponMaterialLibrary } from './weaponMaterials';
+import { WEAPON_ORDER, WeaponId } from './weaponTypes';
+import { WeaponMaterials } from './weaponMaterials';
 import {
   BuiltWeapon,
-  buildWindowedMagazineGroup,
-  computeM870SaddleShellCount,
-  createCartridgeGroup,
-  createLatheAlongZ,
-  createPicatinnyRailGeo,
-  createShotgunShellGroup,
-  createSideExtrudeGeo,
   LiveAmmoVisuals,
-  makePart,
-  safeMergeGeometries,
+  createBarrelGeo,
+  createBeveledOpticHoodGeo,
+  createBeveledProfileGeo,
+  createCartridgeMesh,
+  createChamferedBoxGeo,
+  createPicatinnyStrip,
+  createShotgunShellMesh,
 } from './weaponGeoHelpers';
 
-function collectDispose(root: THREE.Object3D): () => void {
-  return () => {
-    root.traverse((obj) => {
-      if ((obj as THREE.Mesh).isMesh) {
-        (obj as THREE.Mesh).geometry.dispose();
-      }
-    });
+function countWeaponStats(root: THREE.Object3D): { triangleCount: number; materialSlots: number } {
+  let tris = 0;
+  const matSet = new Set<THREE.Material>();
+  root.traverse((obj) => {
+    if (obj instanceof THREE.Mesh && obj.geometry) {
+      const geo = obj.geometry;
+      tris += geo.index ? geo.index.count / 3 : (geo.attributes.position?.count ?? 0) / 3;
+      const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+      for (const m of mats) if (m) matSet.add(m);
+    }
+  });
+  return { triangleCount: Math.round(tris), materialSlots: matSet.size };
+}
+
+function finalizeWeapon(
+  id: WeaponId,
+  root: THREE.Group,
+  sockets: ReturnType<typeof createWeaponSockets>,
+  boltTravelMax: number,
+  boltLiftMax: number,
+  ammoVisuals: LiveAmmoVisuals
+): BuiltWeapon {
+  root.traverse((obj) => {
+    if (obj instanceof THREE.Mesh) {
+      obj.castShadow = true;
+      obj.receiveShadow = true;
+      obj.frustumCulled = false;
+    }
+  });
+
+  const { triangleCount, materialSlots } = countWeaponStats(root);
+
+  return {
+    id,
+    root,
+    gripRight: sockets.gripRight,
+    gripLeft: sockets.gripLeft,
+    muzzleTip: sockets.muzzleSocket,
+    ejectionPort: sockets.ejectionPortSocket,
+    magPivot: sockets.magPivot,
+    boltOrSlide: sockets.boltOrSlide,
+    triggerPivot: sockets.triggerPivot,
+    laserOrigin: sockets.laserSocket,
+    muzzleSocket: sockets.muzzleSocket,
+    laserSocket: sockets.laserSocket,
+    opticEyeSocket: sockets.opticEyeSocket,
+    ejectionPortSocket: sockets.ejectionPortSocket,
+    weaponLightSocket: sockets.weaponLightSocket,
+    magRestPos: sockets.magPivot.position.clone(),
+    magRestRot: sockets.magPivot.rotation.clone(),
+    boltRestPos: sockets.boltOrSlide.position.clone(),
+    boltRestRot: sockets.boltOrSlide.rotation.clone(),
+    boltTravelMax,
+    boltLiftMax,
+    ammoVisuals,
+    materialSlots,
+    triangleCount,
+    dispose: () => {
+      root.traverse((obj) => {
+        if (obj instanceof THREE.Mesh && obj.geometry) {
+          obj.geometry.dispose();
+        }
+      });
+    },
   };
 }
 
-function createSockets(root: THREE.Group) {
-  const gripRight = new THREE.Object3D();
-  gripRight.name = 'Grip_Right';
-  root.add(gripRight);
-
-  const gripLeft = new THREE.Object3D();
-  gripLeft.name = 'Grip_Left';
-  root.add(gripLeft);
-
-  const muzzleTip = new THREE.Object3D();
-  muzzleTip.name = 'Muzzle_Tip';
-  root.add(muzzleTip);
-
-  const ejectionPort = new THREE.Object3D();
-  ejectionPort.name = 'Ejection_Port';
-  root.add(ejectionPort);
+function createWeaponSockets(root: THREE.Group) {
+  const mk = (name: string) => {
+    const o = new THREE.Object3D();
+    o.name = name;
+    root.add(o);
+    return o;
+  };
+  const gripRight = mk('Grip_Right');
+  const gripLeft = mk('Grip_Left');
+  const muzzleSocket = mk('muzzle_socket');
+  const ejectionPortSocket = mk('ejection_port_socket');
+  const laserSocket = mk('laser_socket');
+  const opticEyeSocket = mk('optic_eye_socket');
+  const weaponLightSocket = mk('weapon_light_socket');
 
   const magPivot = new THREE.Group();
   magPivot.name = 'Mag_Pivot';
@@ -54,1823 +107,943 @@ function createSockets(root: THREE.Group) {
   triggerPivot.name = 'Trigger_Pivot';
   root.add(triggerPivot);
 
-  const laserOrigin = new THREE.Object3D();
-  laserOrigin.name = 'Laser_Origin';
-  root.add(laserOrigin);
-
   return {
     gripRight,
     gripLeft,
-    muzzleTip,
-    ejectionPort,
+    muzzleSocket,
+    ejectionPortSocket,
+    laserSocket,
+    opticEyeSocket,
+    weaponLightSocket,
     magPivot,
     boltOrSlide,
     triggerPivot,
-    laserOrigin,
   };
 }
 
+/**
+ * Helper to build a translucent windowed tactical magazine with visible stacked cartridges
+ * and rising spring follower (depletes on fire, refills on reload!).
+ */
+function buildWindowedMagazine(
+  mats: WeaponMaterials,
+  opts: {
+    width: number;
+    depth: number;
+    height: number;
+    curveAngle?: number;
+    slots: number;
+    bodyHex: number;
+    cartLen: number;
+    cartRad: number;
+  }
+): { group: THREE.Group; rounds: THREE.Object3D[]; follower: THREE.Mesh; botY: number; topY: number } {
+  const g = new THREE.Group();
+  const h = opts.height;
+  const w = opts.width;
+  const d = opts.depth;
+
+  // Front & rear polymer spine walls framing clear side windows
+  const frontWall = new THREE.Mesh(
+    createChamferedBoxGeo(w, h, d * 0.24, 0.0014, false, opts.bodyHex),
+    mats.polymer
+  );
+  frontWall.position.set(0, -h * 0.5, d * 0.38);
+  g.add(frontWall);
+
+  const rearWall = new THREE.Mesh(
+    createChamferedBoxGeo(w, h, d * 0.24, 0.0014, false, opts.bodyHex),
+    mats.polymer
+  );
+  rearWall.position.set(0, -h * 0.5, -d * 0.38);
+  g.add(rearWall);
+
+  // Top feed collar & flared floorplate
+  const collar = new THREE.Mesh(
+    createChamferedBoxGeo(w * 1.02, h * 0.16, d, 0.0014, false, opts.bodyHex),
+    mats.polymer
+  );
+  collar.position.set(0, -h * 0.08, 0);
+  g.add(collar);
+
+  const floorplate = new THREE.Mesh(
+    createChamferedBoxGeo(w * 1.12, 0.014, d * 1.10, 0.0018, false, opts.bodyHex),
+    mats.polymer
+  );
+  floorplate.position.set(0, -h - 0.004, 0);
+  g.add(floorplate);
+
+  // Translucent smoked polymer ammo window panes (uses Slot 3 opticGlass -> <= 4 slots!)
+  const winPane = new THREE.Mesh(
+    createChamferedBoxGeo(w * 0.88, h * 0.72, d * 0.54, 0.0008, false, 0xd8e2ea),
+    mats.opticGlass
+  );
+  winPane.position.set(0, -h * 0.52, 0);
+  g.add(winPane);
+
+  // Stacked live cartridges visible through window (bottom -> top)
+  const rounds: THREE.Object3D[] = [];
+  const botY = -h * 0.84;
+  const topY = -h * 0.19;
+  for (let i = 0; i < opts.slots; i++) {
+    const t = opts.slots > 1 ? i / (opts.slots - 1) : 1;
+    const cart = createCartridgeMesh(opts.cartLen, opts.cartRad, mats.ammoAccent);
+    cart.position.set((i % 2 === 0 ? -1 : 1) * 0.0022, THREE.MathUtils.lerp(botY, topY, t), 0);
+    g.add(cart);
+    rounds.push(cart);
+  }
+
+  // High-visibility orange/tan spring follower rising as cartridges deplete
+  const follower = new THREE.Mesh(
+    createChamferedBoxGeo(w * 0.68, 0.007, d * 0.46, 0.001, false, 0xd96b2b),
+    mats.ammoAccent
+  );
+  follower.position.set(0, botY, 0);
+  g.add(follower);
+
+  if (opts.curveAngle) {
+    g.rotation.x = opts.curveAngle;
+  }
+
+  return { group: g, rounds, follower, botY, topY };
+}
+
 // ============================================================================
-// [1] MK18 MOD 1 CQBR CARBINE (5.56x45mm NATO)
+// [1] MK18 MOD 1 CQBR CARBINE (5.56x45mm NATO) — <= 4 Material Slots, Chamfered EOTech
 // ============================================================================
-export function buildMK18(mats: WeaponMaterialLibrary): BuiltWeapon {
+export function buildMK18(mats: WeaponMaterials): BuiltWeapon {
   const root = new THREE.Group();
   root.name = 'Weapon_MK18_Mod1';
-  const s = createSockets(root);
+  const s = createWeaponSockets(root);
 
-  // 1. Beveled AR-15 Lower Receiver + Flared Magwell + Buffer Boss
-  const lowerProfile: [number, number][] = [
-    [-0.036, 0.068],
-    [0.015, 0.068],
-    [0.045, 0.068],
-    [0.168, 0.068],
-    [0.168, 0.012],
-    [0.102, 0.01],
-    [0.09, 0.038],
-    [0.014, 0.038],
-    [-0.022, 0.042],
-    [-0.036, 0.056],
-  ];
-  root.add(
-    makePart(
-      createSideExtrudeGeo(lowerProfile, 0.036, 0.0028, 0.0028, 2),
-      mats.anodizedAluminum,
-      'MK18_Lower_Receiver'
-    )
-  );
-
-  // Flared beveled magwell lip
-  const magwellFlange = createSideExtrudeGeo(
-    [
-      [0.098, 0.008],
-      [0.172, 0.01],
-      [0.172, 0.024],
-      [0.098, 0.022],
-    ],
-    0.041,
-    0.0022,
-    0.0022
-  );
-  root.add(makePart(magwellFlange, mats.anodizedAluminum, 'MK18_Magwell_Flare'));
-
-  // Trigger guard bow
-  const trigGuard = createSideExtrudeGeo(
-    [
-      [0.022, 0.042],
-      [0.026, 0.016],
-      [0.088, 0.016],
-      [0.096, 0.038],
-      [0.088, 0.038],
-      [0.082, 0.022],
-      [0.033, 0.022],
-      [0.029, 0.042],
-    ],
-    0.012,
-    0.0012,
-    0.0012
-  );
-  root.add(makePart(trigGuard, mats.anodizedAluminum, 'MK18_Trigger_Guard'));
-
-  // 2. Beveled Upper Receiver + Brass Deflector + Forward Assist + Dust Cover
-  const upperProfile: [number, number][] = [
-    [-0.038, 0.068],
-    [0.174, 0.068],
-    [0.174, 0.114],
-    [0.162, 0.118],
-    [-0.026, 0.118],
-    [-0.038, 0.106],
-  ];
-  root.add(
-    makePart(
-      createSideExtrudeGeo(upperProfile, 0.038, 0.003, 0.003, 2),
-      mats.anodizedAluminum,
-      'MK18_Upper_Receiver'
-    )
-  );
-
-  // Brass deflector & forward assist housing on right side (-X)
-  const deflectorGeo = new THREE.ConeGeometry(0.01, 0.016, 4);
-  deflectorGeo.rotateZ(Math.PI / 2);
-  deflectorGeo.rotateY(Math.PI / 4);
-  root.add(makePart(deflectorGeo, mats.gunmetalSteel, 'MK18_Brass_Deflector', [-0.022, 0.095, 0.036]));
-
-  const faHousing = createLatheAlongZ(
-    [
-      [0.007, 0],
-      [0.0075, 0.034],
-      [0.0055, 0.038],
-      [0.0085, 0.044],
-      [0.0085, 0.05],
-    ],
-    14
-  );
-  root.add(
-    makePart(faHousing, mats.gunmetalSteel, 'MK18_Forward_Assist', [-0.022, 0.088, -0.018], [0, -0.22, 0])
-  );
-
-  // T-Handle Charging Handle Latch at rear of upper
-  const chLatches = new THREE.BoxGeometry(0.044, 0.012, 0.016);
-  root.add(makePart(chLatches, mats.gunmetalSteel, 'MK18_Charging_Handle', [0, 0.111, -0.044]));
-
-  // Fire selector lever + takedown pins + bolt catch paddle (left side +X)
-  const detailGeos: THREE.BufferGeometry[] = [];
-  const pinRear = new THREE.CylinderGeometry(0.0042, 0.0042, 0.042, 12);
-  pinRear.rotateZ(Math.PI / 2);
-  pinRear.translate(0, 0.062, -0.012);
-  detailGeos.push(pinRear);
-
-  const pinFront = new THREE.CylinderGeometry(0.0042, 0.0042, 0.042, 12);
-  pinFront.rotateZ(Math.PI / 2);
-  pinFront.translate(0, 0.062, 0.155);
-  detailGeos.push(pinFront);
-
-  const selector = new THREE.BoxGeometry(0.006, 0.008, 0.022);
-  selector.translate(0.021, 0.055, 0.015);
-  detailGeos.push(selector);
-
-  const boltCatch = new THREE.BoxGeometry(0.005, 0.024, 0.012);
-  boltCatch.translate(0.021, 0.062, 0.112);
-  detailGeos.push(boltCatch);
-
-  root.add(makePart(safeMergeGeometries(detailGeos), mats.gunmetalSteel, 'MK18_Receiver_Controls'));
-
-  // 3. Ergonomic Stippled A2/MOE Pistol Grip centered at Origin (0,0,0) = Grip_Right!
-  const gripProfile: [number, number][] = [
-    [-0.028, 0.044],
-    [0.026, 0.044],
-    [0.016, 0.006],
-    [0.006, -0.058],
-    [-0.036, -0.058],
-    [-0.034, -0.01],
-  ];
-  root.add(
-    makePart(
-      createSideExtrudeGeo(gripProfile, 0.031, 0.0045, 0.0045, 3),
-      mats.stippledGrip,
-      'MK18_Pistol_Grip'
-    )
-  );
-
-  // 4. Daniel Defense RIS II Quad-Rail Handguard (FDE Bronze-Tan Rail + Ventilated Slots + Picatinny Teeth!)
-  const hgCore = createSideExtrudeGeo(
-    [
-      [0.176, 0.064],
-      [0.418, 0.064],
-      [0.418, 0.114],
-      [0.176, 0.114],
-    ],
-    0.044,
-    0.0042,
-    0.0042,
-    2
-  );
-  root.add(makePart(hgCore, mats.tanRailAccent, 'MK18_RIS2_Handguard'));
-
-  // Dark ventilated cooling slots recessed along both handguard sides
-  const ventGeos: THREE.BufferGeometry[] = [];
-  for (let i = 0; i < 6; i++) {
-    const z = 0.205 + i * 0.035;
-    for (const side of [-1, 1]) {
-      const slotUpper = new THREE.BoxGeometry(0.003, 0.009, 0.022);
-      slotUpper.translate(side * 0.0222, 0.102, z);
-      ventGeos.push(slotUpper);
-      const slotLower = new THREE.BoxGeometry(0.003, 0.009, 0.022);
-      slotLower.translate(side * 0.0222, 0.076, z);
-      ventGeos.push(slotLower);
-    }
-  }
-  root.add(makePart(safeMergeGeometries(ventGeos), mats.tacticalPolymer, 'MK18_Handguard_Vents'));
-
-  // Continuous Full-Length Top Picatinny 1913 Rail + Bottom & Side Rails!
-  const topRail = createPicatinnyRailGeo(-0.024, 0.414, 0.117, 0.0212, 0.0085, 0.0105);
-  root.add(makePart(topRail, mats.gunmetalSteel, 'MK18_Top_Picatinny_Rail'));
-
-  const botRail = createPicatinnyRailGeo(0.184, 0.412, -0.066, 0.021, 0.0075, 0.011);
-  botRail.rotateZ(Math.PI);
-  root.add(makePart(botRail, mats.tanRailAccent, 'MK18_Bottom_Picatinny_Rail'));
-
-  // Side rails (+X and -X)
-  for (const side of [-1, 1]) {
-    const sideRail = createPicatinnyRailGeo(0.19, 0.408, 0.021, 0.018, 0.0065, 0.012);
-    sideRail.rotateZ(side * -Math.PI / 2);
-    sideRail.translate(0, 0.089, 0);
-    root.add(makePart(sideRail, mats.tanRailAccent, `MK18_Side_Rail_${side > 0 ? 'L' : 'R'}`));
-  }
-
-  // 5. Sleek Magpul AFG-2 Angled Tactical Foregrip mounted under RIS II -> Grip_Left target!
-  const afgProfile: [number, number][] = [
-    [0.248, 0.06],
-    [0.358, 0.06],
-    [0.358, 0.048],
-    [0.335, 0.035],
-    [0.278, 0.043],
-    [0.248, 0.052],
-  ];
-  root.add(
-    makePart(
-      createSideExtrudeGeo(afgProfile, 0.026, 0.0028, 0.0028, 2),
-      mats.stippledGrip,
-      'MK18_Angled_Foregrip'
-    )
-  );
-  s.gripLeft.position.set(0, 0.045, 0.305);
-
-  // 6. Match-Grade 10.3" Free-Float Barrel + Gas Block + SOCOM 3-Prong Flash Hider
-  const barrelGeo = createLatheAlongZ(
-    [
-      [0.011, 0.17],
-      [0.011, 0.37],
-      [0.0095, 0.38],
-      [0.0095, 0.475],
-      [0.0122, 0.482], // Collar
-      [0.0115, 0.495],
-      [0.0128, 0.502], // SOCOM suppressor mount flange
-      [0.0108, 0.51],
-      [0.0108, 0.548], // 3-prong flash hider
-      [0.0068, 0.548], // Bore mouth
-      [0.0068, 0.51],
-    ],
-    20
-  );
-  barrelGeo.translate(0, 0.089, 0);
-  root.add(makePart(barrelGeo, mats.gunmetalSteel, 'MK18_Barrel_FlashHider'));
-  s.muzzleTip.position.set(0, 0.089, 0.555);
-
-  // 7. EOTech EXPS3 Holographic Optic (Protective Aluminum Hood + Glass Window + Red Holo Reticle)
-  const eoBase = createSideExtrudeGeo(
-    [
-      [0.045, 0.125],
-      [0.145, 0.125],
-      [0.145, 0.144],
-      [0.11, 0.144],
-      [0.045, 0.138],
-    ],
-    0.036,
-    0.0022,
-    0.0022
-  );
-  root.add(makePart(eoBase, mats.anodizedAluminum, 'MK18_EOTech_Base'));
-
-  // Protective C-hood arch around glass window (left/right walls + top bridge so you see THROUGH it!)
-  const eoHoodGeos: THREE.BufferGeometry[] = [];
-  for (const side of [-1, 1]) {
-    const wall = new THREE.BoxGeometry(0.0045, 0.038, 0.046);
-    wall.translate(side * 0.019, 0.158, 0.072);
-    eoHoodGeos.push(wall);
-  }
-  const eoTop = new THREE.BoxGeometry(0.0425, 0.0048, 0.048);
-  eoTop.translate(0, 0.178, 0.072);
-  eoHoodGeos.push(eoTop);
-  // Front battery compartment cylinder
-  const eoBatt = new THREE.CylinderGeometry(0.011, 0.011, 0.04, 14);
-  eoBatt.rotateZ(Math.PI / 2);
-  eoBatt.translate(0, 0.145, 0.124);
-  eoHoodGeos.push(eoBatt);
-  root.add(makePart(safeMergeGeometries(eoHoodGeos), mats.anodizedAluminum, 'MK18_EOTech_Hood'));
-
-  // Translucent anti-reflective optic glass + glowing red holo ring-dot reticle
-  const eoGlass = makePart(
-    new THREE.PlaneGeometry(0.031, 0.028),
-    mats.opticGlass,
-    'MK18_EOTech_Glass',
-    [0, 0.159, 0.074]
-  );
-  eoGlass.castShadow = false;
-  root.add(eoGlass);
-
-  const eoReticle = makePart(
-    new THREE.PlaneGeometry(0.024, 0.024),
-    mats.reticleEotech,
-    'MK18_EOTech_Reticle',
-    [0, 0.159, 0.072]
-  );
-  eoReticle.castShadow = false;
-  root.add(eoReticle);
-
-  // 8. Top-Rail PEQ-15 Tactical IR/Visible Laser Box
-  const peqProfile: [number, number][] = [
-    [0.322, 0.125],
-    [0.412, 0.125],
-    [0.412, 0.146],
-    [0.34, 0.149],
-    [0.322, 0.141],
-  ];
-  root.add(
-    makePart(
-      createSideExtrudeGeo(peqProfile, 0.042, 0.0025, 0.0025),
-      mats.tanRailAccent,
-      'MK18_PEQ15_Laser'
-    )
-  );
-  const peqEmitter = createLatheAlongZ(
-    [
-      [0.006, 0.41],
-      [0.006, 0.418],
-      [0.003, 0.418],
-    ],
-    12
-  );
-  peqEmitter.translate(-0.01, 0.136, 0);
-  root.add(makePart(peqEmitter, mats.gunmetalSteel, 'MK18_PEQ15_Emitter'));
-  s.laserOrigin.position.set(-0.01, 0.136, 0.42);
-
-  // 9. Collapsible SOPMOD Crane Stock + 6-Position Buffer Tube + Rubber Buttpad
-  const bufTube = createLatheAlongZ(
-    [
-      [0.0155, -0.22],
-      [0.0155, -0.034],
-      [0.018, -0.034],
-      [0.018, -0.024],
-    ],
-    16
-  );
-  bufTube.translate(0, 0.092, 0);
-  root.add(makePart(bufTube, mats.anodizedAluminum, 'MK18_Buffer_Tube'));
-
-  const stockProfile: [number, number][] = [
-    [-0.242, 0.004],
-    [-0.214, 0.004],
-    [-0.148, 0.056],
-    [-0.088, 0.068],
-    [-0.088, 0.114],
-    [-0.242, 0.116],
-  ];
-  root.add(
-    makePart(
-      createSideExtrudeGeo(stockProfile, 0.044, 0.004, 0.004, 2),
-      mats.tacticalPolymer,
-      'MK18_SOPMOD_Stock'
-    )
-  );
-
-  // Cheek battery tubes on SOPMOD stock
-  for (const side of [-1, 1]) {
-    const cheekTube = createLatheAlongZ(
+  // 1. Chamfered AR-15 Lower + Upper Receiver (beveled ExtrudeGeometry + dihedral wear)
+  const lower = new THREE.Mesh(
+    createBeveledProfileGeo(
       [
-        [0.013, -0.236],
-        [0.013, -0.095],
-        [0.009, -0.09],
+        [-0.036, 0.068],
+        [0.168, 0.068],
+        [0.168, 0.012],
+        [0.100, 0.010],
+        [0.088, 0.038],
+        [0.014, 0.038],
+        [-0.036, 0.052],
       ],
-      12
-    );
-    cheekTube.translate(side * 0.016, 0.088, 0);
-    root.add(makePart(cheekTube, mats.tacticalPolymer, `MK18_CheekTube_${side > 0 ? 'L' : 'R'}`));
-  }
-
-  const buttPad = createSideExtrudeGeo(
-    [
-      [-0.254, 0.002],
-      [-0.24, 0.002],
-      [-0.24, 0.118],
-      [-0.254, 0.118],
-    ],
-    0.04,
-    0.003,
-    0.003
+      0.036,
+      0.0024,
+      undefined,
+      true,
+      0xcfd5dc
+    ),
+    mats.metal
   );
-  root.add(makePart(buttPad, mats.rubberPad, 'MK18_Rubber_Buttpad'));
+  root.add(lower);
 
-  // 10. Articulated 30-Round Translucent-Window PMAG / STANAG Magazine (Mag_Pivot)
-  s.magPivot.position.set(0, 0.024, 0.135);
-  const liveAmmo = buildWindowedMagazineGroup(s.magPivot, {
-    spineZY: [
-      [0, 0.02],
-      [0.002, -0.04],
-      [0.01, -0.095],
-      [0.024, -0.148],
-    ],
-    widthX: 0.025,
-    depthZ: 0.062,
-    caliber: '556',
-    stackSlots: 12,
-    bodyMat: mats.tacticalPolymer,
-    windowMat: mats.smokedMagWindow,
-    mats,
-    namePrefix: 'MK18_WindowMag',
-    ribCount: 2,
+  const upper = new THREE.Mesh(
+    createBeveledProfileGeo(
+      [
+        [-0.044, 0.068],
+        [0.172, 0.068],
+        [0.172, 0.114],
+        [-0.044, 0.114],
+      ],
+      0.036,
+      0.0022,
+      undefined,
+      true,
+      0xd8dee6
+    ),
+    mats.metal
+  );
+  root.add(upper);
+
+  // Ergonomic angled pistol grip (FDE polymer via COLOR_0)
+  const grip = new THREE.Mesh(
+    createBeveledProfileGeo(
+      [
+        [-0.036, 0.046],
+        [0.008, 0.044],
+        [-0.014, -0.058],
+        [-0.052, -0.052],
+      ],
+      0.030,
+      0.0032,
+      undefined,
+      false,
+      0x9a8868
+    ),
+    mats.polymer
+  );
+  root.add(grip);
+
+  // Trigger guard & curved trigger blade
+  const trigGuard = new THREE.Mesh(
+    createChamferedBoxGeo(0.014, 0.006, 0.072, 0.0012, true, 0xc2c8d0),
+    mats.metal
+  );
+  trigGuard.position.set(0, 0.012, 0.056);
+  root.add(trigGuard);
+
+  const trigBlade = new THREE.Mesh(
+    createChamferedBoxGeo(0.006, 0.024, 0.007, 0.001, true, 0xb8bec6),
+    mats.metal
+  );
+  trigBlade.position.set(0, -0.010, 0.002);
+  s.triggerPivot.position.set(0, 0.038, 0.048);
+  s.triggerPivot.add(trigBlade);
+
+  // Buffer tube + SOPMOD FDE collapsible stock
+  const buffer = new THREE.Mesh(createBarrelGeo(0.016, 0.016, 0.18, 12, true, 0xc5cbd2), mats.metal);
+  buffer.position.set(0, 0.090, -0.132);
+  root.add(buffer);
+
+  const stock = new THREE.Mesh(
+    createBeveledProfileGeo(
+      [
+        [-0.258, 0.112],
+        [-0.088, 0.112],
+        [-0.096, 0.058],
+        [-0.258, -0.004],
+      ],
+      0.042,
+      0.004,
+      undefined,
+      false,
+      0x9d8a6a
+    ),
+    mats.polymer
+  );
+  root.add(stock);
+
+  // Daniel Defense RIS II Quad Rail Handguard + Top Picatinny + Barrel + SOCOM Suppressor
+  const handguard = new THREE.Mesh(
+    createChamferedBoxGeo(0.048, 0.052, 0.245, 0.003, true, 0x8e7c64),
+    mats.metal
+  );
+  handguard.position.set(0, 0.090, 0.296);
+  root.add(handguard);
+  root.add(createPicatinnyStrip(0.42, 0.022, 0.117, 0.20, mats.metal));
+
+  // Angled Foregrip (AFG)
+  const afg = new THREE.Mesh(
+    createBeveledProfileGeo(
+      [
+        [0.240, 0.064],
+        [0.365, 0.064],
+        [0.352, 0.030],
+        [0.268, 0.038],
+      ],
+      0.032,
+      0.003,
+      undefined,
+      false,
+      0x2f3338
+    ),
+    mats.polymer
+  );
+  root.add(afg);
+
+  // 10.3" Heavy Barrel + Flash Hider / Suppressor
+  const barrel = new THREE.Mesh(createBarrelGeo(0.0105, 0.0115, 0.28, 12, true, 0xbec5ce), mats.metal);
+  barrel.position.set(0, 0.090, 0.36);
+  root.add(barrel);
+
+  const muzzleDev = new THREE.Mesh(createBarrelGeo(0.0145, 0.0135, 0.068, 12, true, 0xb0b8c2), mats.metal);
+  muzzleDev.position.set(0, 0.090, 0.515);
+  root.add(muzzleDev);
+
+  // Chamfered Beveled EOTech EXPS3 Holographic Sight (ExtrudeGeometry hood + AR iridescent lens + red reticle!)
+  const eoBase = new THREE.Mesh(createChamferedBoxGeo(0.044, 0.018, 0.088, 0.0022, true, 0x98886c), mats.metal);
+  eoBase.position.set(0, 0.128, 0.088);
+  root.add(eoBase);
+
+  const eoHood = new THREE.Mesh(
+    createBeveledOpticHoodGeo(0.046, 0.044, 0.034, 0.032, 0.056, 0.0022, 0x9c8c70),
+    mats.metal
+  );
+  eoHood.position.set(0, 0.156, 0.082);
+  root.add(eoHood);
+
+  const eoLens = new THREE.Mesh(new THREE.PlaneGeometry(0.032, 0.030), mats.opticGlass);
+  eoLens.position.set(0, 0.156, 0.082);
+  root.add(eoLens);
+
+  const eoDot = new THREE.Mesh(
+    createChamferedBoxGeo(0.0035, 0.0035, 0.002, 0.0005, false, 0xff2a2a),
+    mats.ammoAccent
+  );
+  eoDot.position.set(0, 0.156, 0.080);
+  root.add(eoDot);
+
+  // PEQ-15 Tactical Laser Module on top rail
+  const peq = new THREE.Mesh(createChamferedBoxGeo(0.042, 0.022, 0.084, 0.0022, false, 0x98876a), mats.polymer);
+  peq.position.set(0.012, 0.129, 0.34);
+  root.add(peq);
+
+  // Reciprocating Bolt Carrier + Visible Chamber Brass
+  const boltCarrier = new THREE.Mesh(createChamferedBoxGeo(0.016, 0.018, 0.078, 0.0014, true, 0xd8dee6), mats.metal);
+  s.boltOrSlide.position.set(-0.011, 0.090, 0.088);
+  s.boltOrSlide.add(boltCarrier);
+
+  const chamberRound = createCartridgeMesh(0.048, 0.0046, mats.ammoAccent);
+  chamberRound.position.set(-0.012, 0.086, 0.118);
+  root.add(chamberRound);
+
+  // Translucent Windowed PMAG with 12 visible live 5.56 brass/copper rounds + rising follower
+  const mag = buildWindowedMagazine(mats, {
+    width: 0.024,
+    depth: 0.058,
+    height: 0.158,
+    curveAngle: 0.11,
+    slots: 12,
+    bodyHex: 0x9a8868,
+    cartLen: 0.046,
+    cartRad: 0.0044,
   });
+  s.magPivot.position.set(0, 0.022, 0.132);
+  s.magPivot.add(mag.group);
 
-  // 11. Reciprocating Chrome-Steel Bolt Carrier inside Right Ejection Port (Bolt_Or_Slide)
-  s.boltOrSlide.position.set(-0.0185, 0.091, 0.095);
-  const boltGeo = new THREE.BoxGeometry(0.007, 0.016, 0.066);
-  s.boltOrSlide.add(makePart(boltGeo, mats.chromeSteel, 'MK18_Bolt_Carrier'));
-  s.ejectionPort.position.set(-0.024, 0.092, 0.095);
+  // Sockets
+  s.gripRight.position.set(0, -0.008, -0.018);
+  s.gripLeft.position.set(0, 0.044, 0.305);
+  s.muzzleSocket.position.set(0, 0.090, 0.555);
+  s.ejectionPortSocket.position.set(-0.022, 0.092, 0.105);
+  s.laserSocket.position.set(0.022, 0.130, 0.386);
+  s.opticEyeSocket.position.set(0, 0.156, 0.048);
+  s.weaponLightSocket.position.set(-0.024, 0.095, 0.395);
 
-  // Live 5.56mm cartridge visible inside ejection port when bolt retracts
-  const mk18Breech = createCartridgeGroup(mats, '556', 'MK18_Breech_Round');
-  mk18Breech.position.set(-0.014, 0.09, 0.105);
-  mk18Breech.visible = false;
-  root.add(mk18Breech);
-  liveAmmo.breechRound = mk18Breech;
-
-  // 12. Articulated Curved Trigger (Trigger_Pivot)
-  s.triggerPivot.position.set(0, 0.044, 0.056);
-  const trigGeo = createSideExtrudeGeo(
-    [
-      [0.002, 0],
-      [-0.004, -0.01],
-      [-0.002, -0.022],
-      [0.003, -0.022],
-      [0.002, -0.01],
-      [0.006, 0],
-    ],
-    0.006,
-    0.0008,
-    0.0008
-  );
-  s.triggerPivot.add(makePart(trigGeo, mats.gunmetalSteel, 'MK18_Trigger'));
-
-  return {
-    id: 'mk18',
-    root,
-    ...s,
-    boltRestPos: s.boltOrSlide.position.clone(),
-    boltRestRot: s.boltOrSlide.rotation.clone(),
-    magRestPos: s.magPivot.position.clone(),
-    magRestRot: s.magPivot.rotation.clone(),
-    boltTravelMax: 0.052,
-    boltLiftMax: 0,
-    liveAmmo,
-    dispose: collectDispose(root),
-  };
+  return finalizeWeapon('mk18', root, s, 0.055, 0, {
+    magRounds: mag.rounds,
+    magFollower: mag.follower,
+    followerBottomY: mag.botY,
+    followerTopY: mag.topY,
+    chamberRound,
+  });
 }
 
 // ============================================================================
-// [2] AK-74M / MODERNIZED AKM RIFLE (7.62x39mm)
+// [2] AK-74M / MODERNIZED AKM (7.62x39mm) — Beveled Kobra Optic + Windowed Mag
 // ============================================================================
-export function buildAK74M(mats: WeaponMaterialLibrary): BuiltWeapon {
+export function buildAK74M(mats: WeaponMaterials): BuiltWeapon {
   const root = new THREE.Group();
   root.name = 'Weapon_AK74M';
-  const s = createSockets(root);
+  const s = createWeaponSockets(root);
 
-  // 1. Stamped Blued-Steel Receiver + Ribbed Top Dust Cover
-  const receiverProfile: [number, number][] = [
-    [-0.042, 0.04],
-    [0.215, 0.04],
-    [0.215, 0.088],
-    [-0.042, 0.088],
-  ];
-  root.add(
-    makePart(
-      createSideExtrudeGeo(receiverProfile, 0.036, 0.0022, 0.0022, 2),
-      mats.bluedSteel,
-      'AK_Stamped_Receiver'
-    )
+  // Stamped beveled receiver + sloped top dust cover
+  const receiver = new THREE.Mesh(
+    createBeveledProfileGeo(
+      [
+        [-0.045, 0.036],
+        [0.195, 0.036],
+        [0.195, 0.106],
+        [-0.045, 0.106],
+      ],
+      0.036,
+      0.0024,
+      undefined,
+      true,
+      0xc2c8d0
+    ),
+    mats.metal
   );
+  root.add(receiver);
 
-  // Iconic domed ribbed top dust cover
-  const dustProfile: [number, number][] = [
-    [-0.042, 0.086],
-    [0.185, 0.086],
-    [0.175, 0.11],
-    [-0.032, 0.106],
-    [-0.042, 0.095],
-  ];
-  root.add(
-    makePart(
-      createSideExtrudeGeo(dustProfile, 0.034, 0.004, 0.004, 3),
-      mats.bluedSteel,
-      'AK_Dust_Cover'
-    )
+  // Bakelite pistol grip
+  const grip = new THREE.Mesh(
+    createBeveledProfileGeo(
+      [
+        [-0.032, 0.038],
+        [0.008, 0.036],
+        [-0.016, -0.062],
+        [-0.050, -0.056],
+      ],
+      0.029,
+      0.0032,
+      undefined,
+      false,
+      0x7c3e26
+    ),
+    mats.polymer
   );
+  root.add(grip);
 
-  // Visible raised stamped steel rivets + dimpled magwell recesses + sweeping right-side fire selector!
-  const rivetGeos: THREE.BufferGeometry[] = [];
-  const rivetCoords: [number, number][] = [
-    [-0.025, 0.072],
-    [-0.025, 0.052],
-    [0.035, 0.058],
-    [0.075, 0.058],
-    [0.185, 0.076],
-    [0.185, 0.052],
-    [0.202, 0.068],
-  ];
-  for (const [z, y] of rivetCoords) {
-    for (const side of [-1, 1]) {
-      const rv = new THREE.SphereGeometry(0.0032, 8, 6);
-      rv.scale(0.55, 1, 1);
-      rv.translate(side * 0.0185, y, z);
-      rivetGeos.push(rv);
-    }
-  }
-  // Dust cover stiffening ribs
-  for (let i = 0; i < 4; i++) {
-    const rib = new THREE.BoxGeometry(0.0355, 0.004, 0.006);
-    rib.translate(0, 0.106, 0.01 + i * 0.036);
-    rivetGeos.push(rib);
-  }
-  // Sweeping right-side steel AK fire selector lever (-X)
-  const selBar = new THREE.BoxGeometry(0.004, 0.014, 0.115);
-  selBar.rotateX(0.09);
-  selBar.translate(-0.0205, 0.069, 0.068);
-  rivetGeos.push(selBar);
-  const selTab = new THREE.BoxGeometry(0.011, 0.01, 0.014);
-  selTab.translate(-0.024, 0.064, 0.122);
-  rivetGeos.push(selTab);
-  // Trigger guard bow
-  const akTrigGuard = createSideExtrudeGeo(
-    [
-      [0.018, 0.042],
-      [0.022, 0.014],
-      [0.088, 0.014],
-      [0.095, 0.042],
-      [0.088, 0.042],
-      [0.082, 0.02],
-      [0.028, 0.02],
-      [0.024, 0.042],
-    ],
-    0.011,
-    0.001,
-    0.001
+  // Trigger guard & trigger
+  const trigGuard = new THREE.Mesh(createChamferedBoxGeo(0.014, 0.005, 0.068, 0.001, true, 0xb8bec6), mats.metal);
+  trigGuard.position.set(0, 0.008, 0.048);
+  root.add(trigGuard);
+
+  const trigBlade = new THREE.Mesh(createChamferedBoxGeo(0.006, 0.024, 0.007, 0.001, true, 0xc2c8d0), mats.metal);
+  trigBlade.position.set(0, -0.010, 0.002);
+  s.triggerPivot.position.set(0, 0.034, 0.044);
+  s.triggerPivot.add(trigBlade);
+
+  // Classic oiled laminated Russian wood buttstock
+  const stock = new THREE.Mesh(
+    createBeveledProfileGeo(
+      [
+        [-0.275, 0.088],
+        [-0.045, 0.096],
+        [-0.045, 0.044],
+        [-0.275, -0.022],
+      ],
+      0.036,
+      0.004,
+      undefined,
+      false,
+      0x8b4d2b
+    ),
+    mats.polymer
   );
-  rivetGeos.push(akTrigGuard);
-  root.add(makePart(safeMergeGeometries(rivetGeos), mats.gunmetalSteel, 'AK_Rivets_Selector'));
+  root.add(stock);
 
-  // 2. Grooved Soviet Bakelite Pistol Grip centered at Origin (0,0,0) = Grip_Right
-  const gripProfile: [number, number][] = [
-    [-0.024, 0.042],
-    [0.022, 0.042],
-    [0.012, -0.004],
-    [0.002, -0.056],
-    [-0.034, -0.056],
-    [-0.03, -0.006],
-  ];
-  root.add(
-    makePart(
-      createSideExtrudeGeo(gripProfile, 0.028, 0.004, 0.004, 3),
-      mats.bakeliteOrange,
-      'AK_Bakelite_Grip'
-    )
+  // Wooden handguard + upper gas tube + iconic AK front sight post + muzzle brake
+  const handguard = new THREE.Mesh(
+    createChamferedBoxGeo(0.042, 0.054, 0.178, 0.004, false, 0x8d4e2c),
+    mats.polymer
   );
+  handguard.position.set(0, 0.072, 0.285);
+  root.add(handguard);
 
-  // 3. Rich Oiled Laminated Wood Handguards (Upper + Swelled Lower) & Solid Buttstock + Steel Buttplate!
-  const lowerWoodProfile: [number, number][] = [
-    [0.215, 0.044],
-    [0.376, 0.05],
-    [0.376, 0.08],
-    [0.215, 0.082],
-  ];
-  root.add(
-    makePart(
-      createSideExtrudeGeo(lowerWoodProfile, 0.038, 0.0055, 0.0055, 3),
-      mats.laminatedWood,
-      'AK_Lower_Wood_Handguard'
-    )
+  const gasTube = new THREE.Mesh(createBarrelGeo(0.011, 0.011, 0.22, 10, true, 0xbfc5cd), mats.metal);
+  gasTube.position.set(0, 0.102, 0.30);
+  root.add(gasTube);
+
+  const barrel = new THREE.Mesh(createBarrelGeo(0.010, 0.011, 0.38, 12, true, 0xbec4cc), mats.metal);
+  barrel.position.set(0, 0.074, 0.385);
+  root.add(barrel);
+
+  const frontSight = new THREE.Mesh(
+    createBeveledProfileGeo(
+      [
+        [0.495, 0.072],
+        [0.530, 0.072],
+        [0.522, 0.132],
+        [0.506, 0.132],
+      ],
+      0.018,
+      0.0014,
+      undefined,
+      true,
+      0xc2c8d0
+    ),
+    mats.metal
   );
-  s.gripLeft.position.set(0, 0.042, 0.295);
+  root.add(frontSight);
 
-  const upperWoodProfile: [number, number][] = [
-    [0.222, 0.086],
-    [0.368, 0.088],
-    [0.368, 0.114],
-    [0.222, 0.115],
-  ];
-  root.add(
-    makePart(
-      createSideExtrudeGeo(upperWoodProfile, 0.032, 0.006, 0.006, 3),
-      mats.laminatedWood,
-      'AK_Upper_Wood_Handguard'
-    )
+  const muzzleBrake = new THREE.Mesh(createBarrelGeo(0.014, 0.013, 0.064, 12, true, 0xb2b8c0), mats.metal);
+  muzzleBrake.position.set(0, 0.074, 0.590);
+  root.add(muzzleBrake);
+
+  // Side-mount Dovetail + Chamfered Beveled Kobra Reflex Sight (ExtrudeGeometry hood + AR iridescent lens!)
+  const sideMount = new THREE.Mesh(createChamferedBoxGeo(0.010, 0.048, 0.092, 0.0014, true, 0xb8bec6), mats.metal);
+  sideMount.position.set(0.022, 0.105, 0.068);
+  root.add(sideMount);
+
+  const kobraBase = new THREE.Mesh(createChamferedBoxGeo(0.038, 0.018, 0.086, 0.002, true, 0xc0c6ce), mats.metal);
+  kobraBase.position.set(0, 0.125, 0.078);
+  root.add(kobraBase);
+
+  const kobraHood = new THREE.Mesh(
+    createBeveledOpticHoodGeo(0.044, 0.038, 0.032, 0.026, 0.052, 0.002, 0xc8ced6),
+    mats.metal
   );
+  kobraHood.position.set(0, 0.150, 0.082);
+  root.add(kobraHood);
 
-  // Classic sloped AK laminated wood buttstock
-  const stockProfile: [number, number][] = [
-    [-0.268, -0.022],
-    [-0.256, -0.022],
-    [-0.04, 0.046],
-    [-0.04, 0.084],
-    [-0.268, 0.088],
-  ];
-  root.add(
-    makePart(
-      createSideExtrudeGeo(stockProfile, 0.036, 0.0045, 0.0045, 3),
-      mats.laminatedWood,
-      'AK_Wood_Buttstock'
-    )
+  const kobraLens = new THREE.Mesh(new THREE.PlaneGeometry(0.030, 0.024), mats.opticGlass);
+  kobraLens.position.set(0, 0.150, 0.082);
+  root.add(kobraLens);
+
+  const kobraDot = new THREE.Mesh(
+    createChamferedBoxGeo(0.0032, 0.0032, 0.002, 0.0005, false, 0xff2a2a),
+    mats.ammoAccent
   );
+  kobraDot.position.set(0, 0.150, 0.080);
+  root.add(kobraDot);
 
-  // Steel buttplate + sling swivel
-  const buttPlate = createSideExtrudeGeo(
-    [
-      [-0.278, -0.024],
-      [-0.266, -0.024],
-      [-0.266, 0.09],
-      [-0.278, 0.09],
-    ],
-    0.034,
-    0.0022,
-    0.0022
-  );
-  root.add(makePart(buttPlate, mats.bluedSteel, 'AK_Steel_Buttplate'));
+  // Reciprocating Charging Handle Bolt Carrier + Chamber Round
+  const boltBody = new THREE.Mesh(createChamferedBoxGeo(0.014, 0.016, 0.082, 0.0012, true, 0xe2e7ee), mats.metal);
+  const boltHandle = new THREE.Mesh(createChamferedBoxGeo(0.024, 0.009, 0.012, 0.0014, true, 0xe2e7ee), mats.metal);
+  boltHandle.position.set(-0.014, 0.002, 0.028);
+  s.boltOrSlide.position.set(-0.014, 0.082, 0.118);
+  s.boltOrSlide.add(boltBody, boltHandle);
 
-  // 4. Barrel, Under-Barrel Cleaning Rod, 45-Degree Gas Block, Gas Tube, Hooded Front Sight, Slant Brake!
-  const barrelGeo = createLatheAlongZ(
-    [
-      [0.0105, 0.21],
-      [0.0105, 0.45],
-      [0.0092, 0.46],
-      [0.0092, 0.578],
-      [0.0115, 0.584], // Slant compensator collar
-      [0.0112, 0.625], // Slant muzzle brake
-      [0.007, 0.625],
-      [0.007, 0.58],
-    ],
-    18
-  );
-  barrelGeo.translate(0, 0.075, 0);
-  root.add(makePart(barrelGeo, mats.bluedSteel, 'AK_Barrel_Compensator'));
-  s.muzzleTip.position.set(0, 0.075, 0.632);
+  const chamberRound = createCartridgeMesh(0.050, 0.0049, mats.ammoAccent);
+  chamberRound.position.set(-0.014, 0.078, 0.132);
+  root.add(chamberRound);
 
-  // Upper gas tube + 45° gas block + cleaning rod + rear sight block + front hooded sight post
-  const gasParts: THREE.BufferGeometry[] = [];
-  const gasTube = createLatheAlongZ(
-    [
-      [0.0085, 0.21],
-      [0.0085, 0.445],
-    ],
-    12
-  );
-  gasTube.translate(0, 0.103, 0);
-  gasParts.push(gasTube);
-
-  const cleaningRod = createLatheAlongZ(
-    [
-      [0.0026, 0.365],
-      [0.0026, 0.555],
-    ],
-    8
-  );
-  cleaningRod.translate(0, 0.058, 0);
-  gasParts.push(cleaningRod);
-
-  // 45-degree iconic AK gas block
-  const gasBlock = createSideExtrudeGeo(
-    [
-      [0.422, 0.064],
-      [0.466, 0.064],
-      [0.448, 0.114],
-      [0.422, 0.114],
-    ],
-    0.022,
-    0.0018,
-    0.0018
-  );
-  gasParts.push(gasBlock);
-
-  // Rear tangent iron sight block
-  const rearSight = createSideExtrudeGeo(
-    [
-      [0.175, 0.088],
-      [0.228, 0.088],
-      [0.228, 0.119],
-      [0.185, 0.118],
-    ],
-    0.026,
-    0.0018,
-    0.0018
-  );
-  gasParts.push(rearSight);
-
-  // Front hooded iron sight tower
-  const frontTower = createSideExtrudeGeo(
-    [
-      [0.542, 0.062],
-      [0.576, 0.062],
-      [0.568, 0.132],
-      [0.554, 0.132],
-    ],
-    0.018,
-    0.0015,
-    0.0015
-  );
-  gasParts.push(frontTower);
-
-  // Protective front sight ring hood
-  const sightHood = new THREE.TorusGeometry(0.011, 0.0024, 8, 16);
-  sightHood.translate(0, 0.132, 0.561);
-  gasParts.push(sightHood);
-
-  root.add(makePart(safeMergeGeometries(gasParts), mats.bluedSteel, 'AK_GasBlock_Sights'));
-
-  // 5. Side Dovetail Mount (+X) + Russian Kobra Low-Profile Reflex Optic
-  const doveMount = createSideExtrudeGeo(
-    [
-      [0.015, 0.058],
-      [0.115, 0.058],
-      [0.105, 0.128],
-      [0.032, 0.128],
-    ],
-    0.008,
-    0.0012,
-    0.0012
-  );
-  doveMount.translate(0.021, 0, 0);
-  root.add(makePart(doveMount, mats.gunmetalSteel, 'AK_Dovetail_SideMount'));
-
-  const kobraGeos: THREE.BufferGeometry[] = [];
-  const kBase = new THREE.BoxGeometry(0.032, 0.016, 0.088);
-  kBase.translate(0, 0.129, 0.072);
-  kobraGeos.push(kBase);
-  for (const side of [-1, 1]) {
-    const wing = new THREE.BoxGeometry(0.004, 0.03, 0.034);
-    wing.translate(side * 0.016, 0.15, 0.095);
-    kobraGeos.push(wing);
-  }
-  const kTop = new THREE.BoxGeometry(0.036, 0.004, 0.034);
-  kTop.translate(0, 0.165, 0.095);
-  kobraGeos.push(kTop);
-  root.add(makePart(safeMergeGeometries(kobraGeos), mats.anodizedAluminum, 'AK_Kobra_Optic'));
-
-  const kGlass = makePart(
-    new THREE.PlaneGeometry(0.026, 0.024),
-    mats.opticGlass,
-    'AK_Kobra_Glass',
-    [0, 0.15, 0.096]
-  );
-  kGlass.castShadow = false;
-  root.add(kGlass);
-
-  const kReticle = makePart(
-    new THREE.PlaneGeometry(0.022, 0.022),
-    mats.reticleKobra,
-    'AK_Kobra_Reticle',
-    [0, 0.15, 0.094]
-  );
-  kReticle.castShadow = false;
-  root.add(kReticle);
-
-  // Compact under-gas-tube tactical laser emitter
-  s.laserOrigin.position.set(0.018, 0.075, 0.44);
-
-  // 6. Iconic Deeply Curved 30-Round Svetogor Windowed Bakelite Banana Magazine (Mag_Pivot)
-  s.magPivot.position.set(0, 0.032, 0.152);
-  const liveAmmo = buildWindowedMagazineGroup(s.magPivot, {
-    spineZY: [
-      [0, 0.015],
-      [0.008, -0.038],
-      [0.026, -0.092],
-      [0.056, -0.145],
-      [0.094, -0.192],
-    ],
-    widthX: 0.026,
-    depthZ: 0.063,
-    caliber: '762',
-    stackSlots: 12,
-    bodyMat: mats.bakeliteOrange,
-    windowMat: mats.bakeliteWindow,
-    mats,
-    namePrefix: 'AK_WindowBananaMag',
-    ribCount: 1,
+  // Iconic Curved Bakelite Translucent-Window AK Magazine (12 visible 7.62 rounds + rising follower)
+  const mag = buildWindowedMagazine(mats, {
+    width: 0.025,
+    depth: 0.062,
+    height: 0.186,
+    curveAngle: 0.24,
+    slots: 12,
+    bodyHex: 0x9b4b28,
+    cartLen: 0.048,
+    cartRad: 0.0048,
   });
+  s.magPivot.position.set(0, 0.034, 0.146);
+  s.magPivot.add(mag.group);
 
-  // 7. Right-Side Reciprocating Steel Bolt Carrier & Hooked Charging Handle (Bolt_Or_Slide)
-  s.boltOrSlide.position.set(-0.018, 0.084, 0.132);
-  const akBoltGeos: THREE.BufferGeometry[] = [];
-  const carrier = new THREE.BoxGeometry(0.008, 0.014, 0.074);
-  akBoltGeos.push(carrier);
-  const handleStem = new THREE.BoxGeometry(0.024, 0.007, 0.01);
-  handleStem.translate(-0.012, 0.002, 0.022);
-  akBoltGeos.push(handleStem);
-  const handleHook = new THREE.CylinderGeometry(0.0045, 0.0045, 0.016, 10);
-  handleHook.translate(-0.024, 0.008, 0.022);
-  akBoltGeos.push(handleHook);
-  s.boltOrSlide.add(makePart(safeMergeGeometries(akBoltGeos), mats.chromeSteel, 'AK_Bolt_Carrier'));
-  s.ejectionPort.position.set(-0.026, 0.086, 0.12);
+  s.gripRight.position.set(0, -0.012, -0.018);
+  s.gripLeft.position.set(0, 0.044, 0.292);
+  s.muzzleSocket.position.set(0, 0.074, 0.625);
+  s.ejectionPortSocket.position.set(-0.022, 0.084, 0.128);
+  s.laserSocket.position.set(0.022, 0.088, 0.375);
+  s.opticEyeSocket.position.set(0, 0.150, 0.046);
+  s.weaponLightSocket.position.set(-0.022, 0.078, 0.375);
 
-  // Live 7.62mm round visible in open right breech when bolt carrier travels back
-  const akBreech = createCartridgeGroup(mats, '762', 'AK_Breech_Round');
-  akBreech.position.set(-0.013, 0.082, 0.138);
-  akBreech.visible = false;
-  root.add(akBreech);
-  liveAmmo.breechRound = akBreech;
-
-  // 8. Articulated Trigger
-  s.triggerPivot.position.set(0, 0.042, 0.05);
-  const akTrig = createSideExtrudeGeo(
-    [
-      [0.002, 0],
-      [-0.005, -0.011],
-      [-0.002, -0.023],
-      [0.003, -0.023],
-      [0.001, -0.011],
-      [0.006, 0],
-    ],
-    0.0055,
-    0.0008,
-    0.0008
-  );
-  s.triggerPivot.add(makePart(akTrig, mats.gunmetalSteel, 'AK_Trigger'));
-
-  return {
-    id: 'ak74m',
-    root,
-    ...s,
-    boltRestPos: s.boltOrSlide.position.clone(),
-    boltRestRot: s.boltOrSlide.rotation.clone(),
-    magRestPos: s.magPivot.position.clone(),
-    magRestRot: s.magPivot.rotation.clone(),
-    boltTravelMax: 0.078,
-    boltLiftMax: 0,
-    liveAmmo,
-    dispose: collectDispose(root),
-  };
+  return finalizeWeapon('ak74m', root, s, 0.078, 0, {
+    magRounds: mag.rounds,
+    magFollower: mag.follower,
+    followerBottomY: mag.botY,
+    followerTopY: mag.topY,
+    chamberRound,
+  });
 }
 
 // ============================================================================
-// [3] BENELLI M4 / M870 TACTICAL COMBAT SHOTGUN (12-Gauge Buckshot)
+// [3] M870 TACTICAL SHOTGUN (12-Gauge Buckshot) — 6 Live Crimson Side-Saddle Shells
 // ============================================================================
-export function buildM870Shotgun(mats: WeaponMaterialLibrary): BuiltWeapon {
+export function buildM870(mats: WeaponMaterials): BuiltWeapon {
   const root = new THREE.Group();
   root.name = 'Weapon_M870_Tactical';
-  const s = createSockets(root);
+  const s = createWeaponSockets(root);
 
-  // 1. CNC Matte-Black Anodized Beveled Receiver + Bottom Stainless Loading Gate
-  const recProfile: [number, number][] = [
-    [-0.026, 0.042],
-    [0.195, 0.042],
-    [0.195, 0.106],
-    [0.0, 0.106],
-    [-0.026, 0.092],
-  ];
-  root.add(
-    makePart(
-      createSideExtrudeGeo(recProfile, 0.039, 0.004, 0.004, 3),
-      mats.anodizedAluminum,
-      'M870_Receiver'
-    )
+  // Heavy beveled steel shotgun receiver
+  const receiver = new THREE.Mesh(
+    createBeveledProfileGeo(
+      [
+        [-0.038, 0.032],
+        [0.195, 0.032],
+        [0.195, 0.106],
+        [-0.038, 0.106],
+      ],
+      0.040,
+      0.003,
+      undefined,
+      true,
+      0xc2c8d0
+    ),
+    mats.metal
   );
+  root.add(receiver);
+  root.add(createPicatinnyStrip(0.18, 0.022, 0.109, 0.085, mats.metal));
 
-  // Recessed chrome/stainless steel bolt visible inside right ejection port + bottom loading gate
-  const ejBolt = new THREE.BoxGeometry(0.005, 0.018, 0.074);
-  root.add(makePart(ejBolt, mats.chromeSteel, 'M870_Internal_Bolt', [-0.019, 0.083, 0.12]));
-  s.ejectionPort.position.set(-0.025, 0.083, 0.125);
-
-  const loadGate = new THREE.BoxGeometry(0.022, 0.005, 0.088);
-  root.add(makePart(loadGate, mats.chromeSteel, 'M870_Loading_Gate', [0, 0.041, 0.125]));
-
-  // Top tactical Picatinny rail + Ghost-Ring Rear & Front Iron Sights
-  const topRail = createPicatinnyRailGeo(0.01, 0.185, 0.105, 0.021, 0.0075, 0.011);
-  root.add(makePart(topRail, mats.gunmetalSteel, 'M870_Top_Rail'));
-
-  const ghostGeos: THREE.BufferGeometry[] = [];
-  const rearRing = new THREE.TorusGeometry(0.0072, 0.0022, 8, 16);
-  rearRing.translate(0, 0.124, 0.022);
-  ghostGeos.push(rearRing);
-  for (const side of [-1, 1]) {
-    const ear = new THREE.BoxGeometry(0.0032, 0.018, 0.014);
-    ear.translate(side * 0.011, 0.121, 0.022);
-    ghostGeos.push(ear);
-    const fEar = new THREE.BoxGeometry(0.003, 0.02, 0.016);
-    fEar.translate(side * 0.009, 0.112, 0.642);
-    ghostGeos.push(fEar);
-  }
-  const frontPost = new THREE.BoxGeometry(0.003, 0.016, 0.005);
-  frontPost.translate(0, 0.111, 0.642);
-  ghostGeos.push(frontPost);
-  root.add(makePart(safeMergeGeometries(ghostGeos), mats.gunmetalSteel, 'M870_GhostRing_Sights'));
-
-  // Glowing tritium front blade dot
-  root.add(
-    makePart(new THREE.SphereGeometry(0.0022, 8, 8), mats.tritiumGreen, 'M870_Front_Tritium', [
-      0, 0.118, 0.641,
-    ])
+  // Tactical pistol grip + collapsible shotgun stock
+  const grip = new THREE.Mesh(
+    createBeveledProfileGeo(
+      [
+        [-0.036, 0.042],
+        [0.006, 0.040],
+        [-0.020, -0.056],
+        [-0.056, -0.048],
+      ],
+      0.032,
+      0.0036,
+      undefined,
+      false,
+      0x2f3338
+    ),
+    mats.polymer
   );
+  root.add(grip);
 
-  // 2. Heavy Barrel + Ventilated Perforated Heat Shield + Extended Tubular Magazine + Clamp!
-  const barrelGeo = createLatheAlongZ(
-    [
-      [0.0138, 0.19],
-      [0.0138, 0.675],
-      [0.0152, 0.678], // Breacher choke crown
-      [0.0152, 0.69],
-      [0.0095, 0.69],
-      [0.0095, 0.64],
-    ],
-    20
+  const stock = new THREE.Mesh(
+    createBeveledProfileGeo(
+      [
+        [-0.268, 0.082],
+        [-0.038, 0.092],
+        [-0.038, 0.040],
+        [-0.268, -0.024],
+      ],
+      0.040,
+      0.0042,
+      undefined,
+      false,
+      0x2c3035
+    ),
+    mats.polymer
   );
-  barrelGeo.translate(0, 0.091, 0);
-  root.add(makePart(barrelGeo, mats.gunmetalSteel, 'M870_Barrel'));
-  s.muzzleTip.position.set(0, 0.091, 0.696);
+  root.add(stock);
 
-  // Ventilated heat shield wrapping upper barrel with cooling holes!
-  const heatShieldGeo = new THREE.CylinderGeometry(
-    0.0164,
-    0.0164,
-    0.34,
-    18,
-    1,
-    true,
-    -Math.PI * 0.72,
-    Math.PI * 1.44
+  const trigBlade = new THREE.Mesh(createChamferedBoxGeo(0.006, 0.024, 0.007, 0.001, true, 0xbec4cc), mats.metal);
+  trigBlade.position.set(0, -0.010, 0.002);
+  s.triggerPivot.position.set(0, 0.032, 0.032);
+  s.triggerPivot.add(trigBlade);
+
+  // Heavy 18.5" Barrel + Underbarrel Tubular Magazine + Barrel Clamp + Ghost Ring Sight
+  const barrel = new THREE.Mesh(createBarrelGeo(0.0135, 0.0145, 0.48, 12, true, 0xc2c8d0), mats.metal);
+  barrel.position.set(0, 0.090, 0.435);
+  root.add(barrel);
+
+  const magTube = new THREE.Mesh(createBarrelGeo(0.0125, 0.0125, 0.43, 12, true, 0xb2b8c0), mats.metal);
+  magTube.position.set(0, 0.058, 0.410);
+  root.add(magTube);
+
+  const clamp = new THREE.Mesh(createChamferedBoxGeo(0.034, 0.062, 0.024, 0.002, true, 0xbec4cc), mats.metal);
+  clamp.position.set(0, 0.074, 0.560);
+  root.add(clamp);
+
+  // Ghost ring rear sight + tritium green front bead
+  const ghostRing = new THREE.Mesh(
+    createBeveledOpticHoodGeo(0.026, 0.026, 0.016, 0.016, 0.014, 0.0012, 0xc8ced6),
+    mats.metal
   );
-  heatShieldGeo.rotateX(Math.PI / 2);
-  heatShieldGeo.translate(0, 0.092, 0.375);
-  root.add(makePart(heatShieldGeo, mats.bluedSteel, 'M870_Heat_Shield'));
+  ghostRing.position.set(0, 0.124, 0.015);
+  root.add(ghostRing);
 
-  // Visual cooling perforations along heat shield
-  const perfGeos: THREE.BufferGeometry[] = [];
-  for (let i = 0; i < 10; i++) {
-    const z = 0.228 + i * 0.032;
-    for (const ang of [-0.7, 0, 0.7]) {
-      const hole = new THREE.CylinderGeometry(0.0036, 0.0036, 0.004, 8);
-      hole.rotateZ(-ang);
-      hole.translate(Math.sin(ang) * 0.0162, 0.092 + Math.cos(ang) * 0.0162, z);
-      perfGeos.push(hole);
-    }
-  }
-  root.add(makePart(safeMergeGeometries(perfGeos), mats.rubberPad, 'M870_HeatShield_Vents'));
-
-  // Extended 8-shell under-barrel tubular magazine + tactical barrel clamp
-  const magTubeGeo = createLatheAlongZ(
-    [
-      [0.0128, 0.19],
-      [0.0128, 0.648],
-      [0.014, 0.652], // Knurled endcap
-      [0.014, 0.668],
-      [0.009, 0.672],
-    ],
-    18
+  const frontBead = new THREE.Mesh(
+    createChamferedBoxGeo(0.006, 0.010, 0.006, 0.001, false, 0x34e86a),
+    mats.ammoAccent
   );
-  magTubeGeo.translate(0, 0.06, 0);
-  root.add(makePart(magTubeGeo, mats.gunmetalSteel, 'M870_Magazine_Tube'));
+  frontBead.position.set(0, 0.112, 0.648);
+  root.add(frontBead);
 
-  const clampGeo = createSideExtrudeGeo(
-    [
-      [0.578, 0.044],
-      [0.608, 0.044],
-      [0.608, 0.107],
-      [0.578, 0.107],
-    ],
-    0.032,
-    0.0022,
-    0.0022
+  // Sliding Ribbed Pump Forend (connected to boltOrSlide so pump animation slides smoothly!)
+  const pumpBody = new THREE.Mesh(
+    createChamferedBoxGeo(0.044, 0.048, 0.175, 0.0045, false, 0x2a2e33),
+    mats.polymer
   );
-  root.add(makePart(clampGeo, mats.anodizedAluminum, 'M870_Barrel_Clamp'));
-  s.laserOrigin.position.set(-0.018, 0.06, 0.615);
+  s.boltOrSlide.position.set(0, 0.056, 0.345);
+  s.boltOrSlide.add(pumpBody);
 
-  // 3. Side-Mounted 6-Shell Tactical Carrier Saddle (Left side +X) with individual retention loops + 6 LIVE crimson brass-base shells!
-  const saddlePlate = createSideExtrudeGeo(
-    [
-      [0.026, 0.056],
-      [0.172, 0.056],
-      [0.172, 0.092],
-      [0.026, 0.092],
-    ],
-    0.008,
-    0.0015,
-    0.0015
+  // Left-side Receiver Side-Saddle Carrier with 6 LIVE CRIMSON 12-GAUGE BUCKSHOT SHELLS!
+  const saddlePlate = new THREE.Mesh(
+    createChamferedBoxGeo(0.010, 0.048, 0.148, 0.0018, false, 0x24282d),
+    mats.polymer
   );
-  saddlePlate.translate(0.023, 0, 0);
-  root.add(makePart(saddlePlate, mats.tacticalPolymer, 'M870_Shell_Saddle_Plate'));
+  saddlePlate.position.set(0.024, 0.072, 0.086);
+  root.add(saddlePlate);
 
-  // Sculpted C-clip shell retention loops (stay visibly empty when red shells deplete!)
-  const clipGeos: THREE.BufferGeometry[] = [];
   const saddleShells: THREE.Object3D[] = [];
   for (let i = 0; i < 6; i++) {
-    const sz = 0.041 + i * 0.0232;
-    const clip = new THREE.CylinderGeometry(
-      0.0108,
-      0.0108,
-      0.022,
-      12,
-      1,
-      true,
-      -Math.PI * 0.2,
-      Math.PI * 1.4
-    );
-    clip.translate(0.032, 0.076, sz);
-    clipGeos.push(clip);
-
-    const shell = createShotgunShellGroup(mats, `M870_SaddleShell_${i + 1}`);
-    shell.position.set(0.032, 0.078, sz);
-    root.add(shell);
-    saddleShells.push(shell);
+    const sh = createShotgunShellMesh(mats.ammoAccent);
+    // Stand vertically in left-side shell loops (brass base up!)
+    sh.rotation.x = Math.PI * 0.5;
+    sh.position.set(0.032, 0.072, 0.026 + i * 0.024);
+    root.add(sh);
+    saddleShells.push(sh);
   }
-  root.add(makePart(safeMergeGeometries(clipGeos), mats.tacticalPolymer, 'M870_Shell_Saddle_Clips'));
 
-  // 4. Sliding Ribbed Tactical Polymer Pump Forend (Bolt_Or_Slide — carries Grip_Left inside it!)
-  s.boltOrSlide.position.set(0, 0.059, 0.355);
-  const pumpGeos: THREE.BufferGeometry[] = [];
-  const pumpCore = createLatheAlongZ(
-    [
-      [0.017, -0.095],
-      [0.0225, -0.088],
-      [0.023, 0.088],
-      [0.017, 0.095],
-    ],
-    16
-  );
-  pumpGeos.push(pumpCore);
-  // Crisp tactical grip ribs along pump forend
-  for (let i = 0; i < 11; i++) {
-    const z = -0.075 + i * 0.015;
-    const rib = new THREE.TorusGeometry(0.023, 0.0024, 6, 16);
-    rib.translate(0, 0, z);
-    pumpGeos.push(rib);
-  }
-  // Dual stainless steel action bars linking pump to receiver
-  for (const side of [-1, 1]) {
-    const bar = new THREE.BoxGeometry(0.0032, 0.007, 0.16);
-    bar.translate(side * 0.016, 0.002, -0.14);
-    pumpGeos.push(bar);
-  }
-  s.boltOrSlide.add(makePart(safeMergeGeometries(pumpGeos), mats.stippledGrip, 'M870_Sliding_Pump'));
-
-  // IMPORTANT: Re-parent Grip_Left INSIDE Bolt_Or_Slide so when the shotgun pumps back & forth,
-  // the real-time 2-bone analytical IK pulls Hand_L seamlessly with the sliding pump!
-  root.remove(s.gripLeft);
-  s.gripLeft.position.set(0, -0.022, 0.0);
-  s.boltOrSlide.add(s.gripLeft);
-
-  // 5. Ergonomic Pistol-Grip Tactical Buttstock + Thick Rubber Recoil Pad
-  const gripProfile: [number, number][] = [
-    [-0.024, 0.046],
-    [0.022, 0.046],
-    [0.014, 0.004],
-    [0.005, -0.056],
-    [-0.034, -0.056],
-    [-0.032, -0.008],
-  ];
-  root.add(
-    makePart(
-      createSideExtrudeGeo(gripProfile, 0.032, 0.0045, 0.0045, 3),
-      mats.stippledGrip,
-      'M870_Pistol_Grip'
-    )
-  );
-
-  const stockProfile: [number, number][] = [
-    [-0.258, -0.016],
-    [-0.236, -0.016],
-    [-0.088, 0.048],
-    [-0.024, 0.054],
-    [-0.024, 0.088],
-    [-0.258, 0.094],
-  ];
-  root.add(
-    makePart(
-      createSideExtrudeGeo(stockProfile, 0.038, 0.0045, 0.0045, 3),
-      mats.tacticalPolymer,
-      'M870_Tactical_Stock'
-    )
-  );
-
-  const padGeo = createSideExtrudeGeo(
-    [
-      [-0.275, -0.018],
-      [-0.256, -0.018],
-      [-0.256, 0.096],
-      [-0.275, 0.096],
-    ],
-    0.038,
-    0.0038,
-    0.0038
-  );
-  root.add(makePart(padGeo, mats.rubberPad, 'M870_Recoil_Pad'));
-
-  // Trigger guard & articulated trigger
-  const guardGeo = createSideExtrudeGeo(
-    [
-      [0.02, 0.044],
-      [0.026, 0.014],
-      [0.084, 0.014],
-      [0.09, 0.044],
-      [0.084, 0.044],
-      [0.079, 0.021],
-      [0.031, 0.021],
-      [0.026, 0.044],
-    ],
-    0.012,
-    0.0012,
-    0.0012
-  );
-  root.add(makePart(guardGeo, mats.tacticalPolymer, 'M870_Trigger_Guard'));
-
-  s.triggerPivot.position.set(0, 0.044, 0.052);
-  const trigGeo = createSideExtrudeGeo(
-    [
-      [0.002, 0],
-      [-0.004, -0.01],
-      [-0.002, -0.022],
-      [0.003, -0.022],
-      [0.002, -0.01],
-      [0.006, 0],
-    ],
-    0.006,
-    0.0008,
-    0.0008
-  );
-  s.triggerPivot.add(makePart(trigGeo, mats.gunmetalSteel, 'M870_Trigger'));
-
-  // 6. Thumb-Fed Loose 12-Gauge Reload Shell in Mag_Pivot + Breech Live Shell!
-  s.magPivot.position.set(0, 0.032, 0.125);
-  const reloadShell = createShotgunShellGroup(mats, 'M870_Reload_Shell');
-  reloadShell.rotation.x = Math.PI / 2;
-  reloadShell.visible = false; // Shown visibly in Hand_L during thumb-fed shell reload!
+  // Reload hand-fed single crimson shell inside magPivot (shown during M870 thumb-feed reload!)
+  const reloadShell = createShotgunShellMesh(mats.ammoAccent);
+  reloadShell.visible = false;
+  s.magPivot.position.set(0, 0.026, 0.125);
   s.magPivot.add(reloadShell);
 
-  const m870Breech = createShotgunShellGroup(mats, 'M870_Breech_Shell');
-  m870Breech.rotation.x = Math.PI / 2;
-  m870Breech.position.set(-0.015, 0.083, 0.128);
-  m870Breech.visible = false;
-  root.add(m870Breech);
+  // Visible chamber brass shell peeking in right-side ejection port
+  const chamberRound = createShotgunShellMesh(mats.ammoAccent);
+  chamberRound.position.set(-0.018, 0.074, 0.122);
+  root.add(chamberRound);
 
-  const liveAmmo: LiveAmmoVisuals = {
+  // Grip_Left anchored directly inside boltOrSlide so left hand tracks the pump forend during cycling!
+  s.gripLeft.parent?.remove(s.gripLeft);
+  s.boltOrSlide.add(s.gripLeft);
+  s.gripLeft.position.set(0, -0.012, 0.0);
+
+  s.gripRight.position.set(0, -0.010, -0.022);
+  s.muzzleSocket.position.set(0, 0.090, 0.680);
+  s.ejectionPortSocket.position.set(-0.024, 0.078, 0.118);
+  s.laserSocket.position.set(0.022, 0.074, 0.578);
+  s.opticEyeSocket.position.set(0, 0.124, -0.020);
+  s.weaponLightSocket.position.set(-0.022, 0.074, 0.578);
+
+  return finalizeWeapon('m870', root, s, 0.092, 0, {
+    magRounds: [],
     saddleShells,
-    windowCartridges: [],
-    topFeedRound: reloadShell,
-    followerMesh: null,
-    breechRound: m870Breech,
-    syncLiveAmmo: (
-      magCount,
-      magSize,
-      isReloading,
-      reloadProgress,
-      preReloadMag,
-      reserve,
-      boltTravel = 0
-    ) => {
-      const visibleShells = computeM870SaddleShellCount(
-        magCount,
-        magSize,
-        isReloading,
-        reloadProgress,
-        preReloadMag,
-        reserve
-      );
-      // Deplete rear-to-front (index 5 down to 0) as you fire, refill front-to-rear during reload!
-      for (let i = 0; i < saddleShells.length; i++) {
-        saddleShells[i].visible = i < visibleShells;
-      }
-      m870Breech.visible = magCount > 0 && boltTravel > 0.18;
-    },
-  };
-
-  return {
-    id: 'm870',
-    root,
-    ...s,
-    boltRestPos: s.boltOrSlide.position.clone(),
-    boltRestRot: s.boltOrSlide.rotation.clone(),
-    magRestPos: s.magPivot.position.clone(),
-    magRestRot: s.magPivot.rotation.clone(),
-    boltTravelMax: 0.088,
-    boltLiftMax: 0,
-    liveAmmo,
-    dispose: collectDispose(root),
-  };
+    chamberRound,
+  });
 }
 
 // ============================================================================
-// [4] AWM / M200 PRECISION BOLT-ACTION SNIPER RIFLE (.338 Lapua Magnum)
+// [4] AWM .338 LAPUA PRECISION SNIPER — Beveled Thumbhole Chassis + AR Scope
 // ============================================================================
-export function buildAWMSniper(mats: WeaponMaterialLibrary): BuiltWeapon {
+export function buildAWM(mats: WeaponMaterials): BuiltWeapon {
   const root = new THREE.Group();
-  root.name = 'Weapon_AWM_Sniper';
-  const s = createSockets(root);
+  root.name = 'Weapon_AWM_338';
+  const s = createWeaponSockets(root);
 
-  // 1. Heavy OD-Olive Precision Tactical Chassis Stock (Thumbhole Frame + Raised Cheek Riser + Forend)
-  const chassisMain: [number, number][] = [
-    [-0.032, 0.048],
-    [0.032, 0.048],
-    [0.095, 0.044],
-    [0.19, 0.044],
-    [0.495, 0.055],
-    [0.505, 0.088],
-    [0.19, 0.088],
-    [-0.032, 0.088],
-  ];
-  root.add(
-    makePart(
-      createSideExtrudeGeo(chassisMain, 0.044, 0.004, 0.004, 2),
-      mats.sniperChassisOD,
-      'AWM_Chassis_Forend'
-    )
+  // Iconic Olive-Drab Beveled Accuracy International Thumbhole Chassis (ExtrudeGeometry with real thumbhole cutout!)
+  const chassis = new THREE.Mesh(
+    createBeveledProfileGeo(
+      [
+        [-0.315, 0.088],
+        [0.440, 0.088],
+        [0.455, 0.056],
+        [0.180, 0.042],
+        [0.095, 0.036],
+        [0.012, 0.036],
+        [-0.012, -0.054],
+        [-0.055, -0.054],
+        [-0.058, 0.014],
+        [-0.255, -0.024],
+        [-0.315, -0.024],
+      ],
+      0.040,
+      0.0038,
+      [
+        // Real beveled thumbhole opening inside rear stock!
+        [
+          [-0.228, 0.058],
+          [-0.072, 0.058],
+          [-0.076, 0.006],
+          [-0.222, -0.006],
+        ],
+      ],
+      false,
+      0x4e5c42
+    ),
+    mats.polymer
   );
-  s.gripLeft.position.set(0, 0.044, 0.34);
+  root.add(chassis);
 
-  // Ergonomic thumbhole pistol grip centered at Origin (0,0,0) = Grip_Right
-  const gripProfile: [number, number][] = [
-    [-0.024, 0.05],
-    [0.024, 0.05],
-    [0.014, 0.002],
-    [0.006, -0.058],
-    [-0.036, -0.058],
-    [-0.032, -0.006],
-  ];
-  root.add(
-    makePart(
-      createSideExtrudeGeo(gripProfile, 0.033, 0.0045, 0.0045, 3),
-      mats.sniperChassisOD,
-      'AWM_Pistol_Grip'
-    )
-  );
+  // Adjustable black polymer cheek riser + rubber recoil buttpad
+  const cheekRiser = new THREE.Mesh(createChamferedBoxGeo(0.044, 0.026, 0.125, 0.004, false, 0x262a2e), mats.polymer);
+  cheekRiser.position.set(0, 0.104, -0.195);
+  root.add(cheekRiser);
 
-  // Rear buttstock upper bridge + lower thumbhole strut (genuine open thumbhole!)
-  const stockTop: [number, number][] = [
-    [-0.275, 0.056],
-    [-0.025, 0.056],
-    [-0.025, 0.088],
-    [-0.275, 0.092],
-  ];
-  root.add(
-    makePart(
-      createSideExtrudeGeo(stockTop, 0.042, 0.0038, 0.0038, 2),
-      mats.sniperChassisOD,
-      'AWM_Stock_Upper'
-    )
-  );
+  const buttPad = new THREE.Mesh(createChamferedBoxGeo(0.042, 0.114, 0.020, 0.003, false, 0x1e2024), mats.polymer);
+  buttPad.position.set(0, 0.032, -0.324);
+  root.add(buttPad);
 
-  const stockBottomStrut: [number, number][] = [
-    [-0.275, -0.044],
-    [-0.235, -0.044],
-    [-0.145, -0.056],
-    [-0.018, -0.056],
-    [-0.018, -0.032],
-    [-0.14, -0.032],
-    [-0.228, -0.014],
-    [-0.228, 0.058],
-    [-0.275, 0.058],
-  ];
-  root.add(
-    makePart(
-      createSideExtrudeGeo(stockBottomStrut, 0.036, 0.0035, 0.0035, 2),
-      mats.sniperChassisOD,
-      'AWM_Stock_Thumbhole_Strut'
-    )
-  );
+  // Heavy Fluted Steel Action Receiver + 27" Free-Float Barrel + Dual-Chamber Tank Muzzle Brake
+  const action = new THREE.Mesh(createChamferedBoxGeo(0.038, 0.036, 0.245, 0.0028, true, 0xc8ced6), mats.metal);
+  action.position.set(0, 0.098, 0.115);
+  root.add(action);
 
-  // Adjustable raised cheek-weld pad + thick recoil buttpad
-  const cheekPad = createSideExtrudeGeo(
-    [
-      [-0.23, 0.094],
-      [-0.092, 0.094],
-      [-0.1, 0.122],
-      [-0.222, 0.122],
-    ],
-    0.044,
-    0.0045,
-    0.0045,
-    3
-  );
-  root.add(makePart(cheekPad, mats.rubberPad, 'AWM_Cheek_Riser'));
+  const barrel = new THREE.Mesh(createBarrelGeo(0.0115, 0.0145, 0.62, 12, true, 0xc2c8d0), mats.metal);
+  barrel.position.set(0, 0.098, 0.545);
+  root.add(barrel);
 
-  const recoilPad = createSideExtrudeGeo(
-    [
-      [-0.296, -0.046],
-      [-0.274, -0.046],
-      [-0.274, 0.096],
-      [-0.296, 0.096],
-    ],
-    0.042,
-    0.004,
-    0.004
-  );
-  root.add(makePart(recoilPad, mats.rubberPad, 'AWM_Recoil_Buttpad'));
+  const muzzleBrake = new THREE.Mesh(createChamferedBoxGeo(0.038, 0.026, 0.078, 0.0024, true, 0xb8bec6), mats.metal);
+  muzzleBrake.position.set(0, 0.098, 0.885);
+  root.add(muzzleBrake);
 
-  // 2. Heavy Steel Action Receiver + Top 20-MOA Picatinny Rail
-  const actionGeo = createLatheAlongZ(
-    [
-      [0.0195, -0.015],
-      [0.0195, 0.225],
-    ],
-    18
-  );
-  actionGeo.translate(0, 0.098, 0);
-  root.add(makePart(actionGeo, mats.gunmetalSteel, 'AWM_Steel_Action'));
-
-  const scopeRail = createPicatinnyRailGeo(0.015, 0.23, 0.115, 0.0212, 0.008, 0.011);
-  root.add(makePart(scopeRail, mats.anodizedAluminum, 'AWM_20MOA_Rail'));
-
-  // 3. Long Fluted Match-Grade Free-Float Barrel + Aggressive Slotted Tank-Style Muzzle Brake!
-  const barrelGeo = createLatheAlongZ(
-    [
-      [0.0165, 0.22],
-      [0.0145, 0.36],
-      [0.0128, 0.81],
-      [0.015, 0.815], // Brake thread collar
-    ],
-    22
-  );
-  barrelGeo.translate(0, 0.098, 0);
-  root.add(makePart(barrelGeo, mats.gunmetalSteel, 'AWM_Match_Barrel'));
-
-  // Longitudinal barrel flutes (6 dark recessed machined flutes around barrel!)
-  const fluteGeos: THREE.BufferGeometry[] = [];
-  for (let i = 0; i < 6; i++) {
-    const ang = (i / 6) * Math.PI * 2;
-    const flute = new THREE.CylinderGeometry(0.0022, 0.0022, 0.44, 6);
-    flute.rotateX(Math.PI / 2);
-    flute.translate(Math.cos(ang) * 0.0132, 0.098 + Math.sin(ang) * 0.0132, 0.56);
-    fluteGeos.push(flute);
+  // Folded Front Bipod Legs under forend
+  for (const side of [-1, 1] as const) {
+    const leg = new THREE.Mesh(createBarrelGeo(0.0065, 0.0065, 0.20, 8, true, 0xb4bac2), mats.metal);
+    leg.position.set(side * 0.024, 0.046, 0.36);
+    root.add(leg);
   }
-  root.add(makePart(safeMergeGeometries(fluteGeos), mats.anodizedAluminum, 'AWM_Barrel_Flutes'));
 
-  // Aggressive Multi-Chamber Slotted Tank-Style Muzzle Brake!
-  const brakeGeos: THREE.BufferGeometry[] = [];
-  const brakeTop = new THREE.BoxGeometry(0.036, 0.006, 0.088);
-  brakeTop.translate(0, 0.111, 0.858);
-  brakeGeos.push(brakeTop);
-  const brakeBot = new THREE.BoxGeometry(0.036, 0.006, 0.088);
-  brakeBot.translate(0, 0.085, 0.858);
-  brakeGeos.push(brakeBot);
-  // 4 vertical angled blast baffles separating 3 side-venting chambers!
-  for (let i = 0; i < 4; i++) {
-    const z = 0.818 + i * 0.0265;
-    const baffle = new THREE.BoxGeometry(0.036, 0.026, 0.0075);
-    baffle.translate(0, 0.098, z);
-    brakeGeos.push(baffle);
+  // Precision 10x42 Tactical Scope + Twin Mount Rings + AR Iridescent Objective & Ocular Lenses
+  for (const rz of [0.045, 0.165]) {
+    const ring = new THREE.Mesh(createChamferedBoxGeo(0.038, 0.046, 0.022, 0.0022, true, 0xc0c6ce), mats.metal);
+    ring.position.set(0, 0.136, rz);
+    root.add(ring);
   }
-  root.add(makePart(safeMergeGeometries(brakeGeos), mats.bluedSteel, 'AWM_Tank_Muzzle_Brake'));
-  s.muzzleTip.position.set(0, 0.098, 0.908);
+  const scopeTube = new THREE.Mesh(createBarrelGeo(0.017, 0.017, 0.34, 14, true, 0xc8ced6), mats.metal);
+  scopeTube.position.set(0, 0.156, 0.115);
+  root.add(scopeTube);
 
-  // 4. Oversized High-Magnification Telescopic Sniper Scope on Dual CNC Cantilever Rings!
-  const scopeTube = createLatheAlongZ(
-    [
-      [0.021, -0.055], // Ocular eyepiece bell
-      [0.0225, -0.045],
-      [0.0225, 0.025],
-      [0.0165, 0.042], // Zoom ring taper
-      [0.0185, 0.052], // Magnification throw ring
-      [0.016, 0.062],
-      [0.016, 0.215], // Main 34mm tube
-      [0.0285, 0.275], // Objective bell flare
-      [0.0285, 0.375], // Long sunshade hood
-      [0.0255, 0.375],
-      [0.0255, 0.33],
-    ],
-    24
-  );
-  scopeTube.translate(0, 0.162, 0);
-  root.add(makePart(scopeTube, mats.anodizedAluminum, 'AWM_Telescopic_Scope'));
+  const scopeBell = new THREE.Mesh(createBarrelGeo(0.028, 0.018, 0.095, 14, true, 0xc8ced6), mats.metal);
+  scopeBell.position.set(0, 0.156, 0.315);
+  root.add(scopeBell);
 
-  // Dual CNC cantilever scope rings + micrometer elevation/windage/parallax turrets
-  const scopeHardware: THREE.BufferGeometry[] = [];
-  for (const rz of [0.088, 0.182]) {
-    const ring = new THREE.TorusGeometry(0.0185, 0.0042, 8, 20);
-    ring.translate(0, 0.162, rz);
-    scopeHardware.push(ring);
-    const stem = new THREE.BoxGeometry(0.024, 0.038, 0.02);
-    stem.translate(0, 0.135, rz);
-    scopeHardware.push(stem);
-  }
-  // Elevation top micrometer turret
-  const elevTurret = new THREE.CylinderGeometry(0.0115, 0.0115, 0.024, 16);
-  elevTurret.translate(0, 0.186, 0.135);
-  scopeHardware.push(elevTurret);
-  // Windage right turret (-X)
-  const windTurret = new THREE.CylinderGeometry(0.0105, 0.0105, 0.022, 16);
-  windTurret.rotateZ(Math.PI / 2);
-  windTurret.translate(-0.024, 0.162, 0.135);
-  scopeHardware.push(windTurret);
-  // Parallax side knob (+X)
-  const paraTurret = new THREE.CylinderGeometry(0.0105, 0.0105, 0.02, 16);
-  paraTurret.rotateZ(Math.PI / 2);
-  paraTurret.translate(0.024, 0.162, 0.135);
-  scopeHardware.push(paraTurret);
-
-  root.add(makePart(safeMergeGeometries(scopeHardware), mats.gunmetalSteel, 'AWM_Scope_Rings_Turrets'));
-
-  // Sapphire-emerald reflective objective lens + rear eyepiece lens + illuminated mildot reticle
-  const objLens = makePart(
-    new THREE.CircleGeometry(0.025, 22),
-    mats.sniperLensEmerald,
-    'AWM_Scope_Objective_Lens',
-    [0, 0.162, 0.345]
-  );
-  objLens.castShadow = false;
+  const objLens = new THREE.Mesh(new THREE.CircleGeometry(0.025, 14), mats.opticGlass);
+  objLens.position.set(0, 0.156, 0.362);
   root.add(objLens);
 
-  const eyeLens = makePart(
-    new THREE.CircleGeometry(0.0185, 20),
-    mats.opticGlass,
-    'AWM_Scope_Eyepiece_Lens',
-    [0, 0.162, -0.054],
-    [0, Math.PI, 0]
-  );
-  eyeLens.castShadow = false;
-  root.add(eyeLens);
+  const ocularLens = new THREE.Mesh(new THREE.CircleGeometry(0.019, 14), mats.opticGlass);
+  ocularLens.rotation.y = Math.PI;
+  ocularLens.position.set(0, 0.156, -0.055);
+  root.add(ocularLens);
 
-  const mildotRet = makePart(
-    new THREE.PlaneGeometry(0.03, 0.03),
-    mats.reticleMildot,
-    'AWM_Scope_Mildot_Reticle',
-    [0, 0.162, -0.052]
-  );
-  mildotRet.castShadow = false;
-  root.add(mildotRet);
+  // Turrets
+  const elevTurret = new THREE.Mesh(createChamferedBoxGeo(0.020, 0.022, 0.020, 0.002, true, 0xc0c6ce), mats.metal);
+  elevTurret.position.set(0, 0.180, 0.105);
+  root.add(elevTurret);
 
-  // 5. Folding Twin-Leg Tactical Front Bipod mounted solidly beneath forend!
-  const bipodGeos: THREE.BufferGeometry[] = [];
-  const bpMount = new THREE.BoxGeometry(0.036, 0.02, 0.044);
-  bpMount.translate(0, 0.046, 0.472);
-  bipodGeos.push(bpMount);
+  // Manual 60-degree Lifting Bolt Handle + Chrome Bolt Body
+  const boltBody = new THREE.Mesh(createBarrelGeo(0.010, 0.010, 0.135, 10, true, 0xe8edf4), mats.metal);
+  const boltStem = new THREE.Mesh(createChamferedBoxGeo(0.042, 0.008, 0.008, 0.001, true, 0xe2e8f0), mats.metal);
+  boltStem.position.set(-0.024, -0.012, -0.036);
+  boltStem.rotation.z = 0.45;
+  const boltKnob = new THREE.Mesh(new THREE.SphereGeometry(0.011, 10, 8), mats.metal);
+  boltKnob.position.set(-0.044, -0.026, -0.036);
+  s.boltOrSlide.position.set(0, 0.098, 0.075);
+  s.boltOrSlide.add(boltBody, boltStem, boltKnob);
 
-  for (const side of [-1, 1]) {
-    // Build each leg + notched collar + rubber foot in hinge-local space (0 -> -0.155 along -Y)
-    // then apply identical forward/splay rotations so feet stay 100% bolted to leg tips!
-    const legUpper = new THREE.CylinderGeometry(0.0056, 0.005, 0.088, 10);
-    legUpper.translate(0, -0.044, 0);
-    const legLower = new THREE.CylinderGeometry(0.0042, 0.004, 0.068, 10);
-    legLower.translate(0, -0.118, 0);
-    const legCollar = new THREE.CylinderGeometry(0.0068, 0.0068, 0.012, 10);
-    legCollar.translate(0, -0.086, 0);
-    const legFoot = new THREE.CylinderGeometry(0.0072, 0.009, 0.016, 12);
-    legFoot.translate(0, -0.155, 0);
+  // Trigger blade
+  const trigBlade = new THREE.Mesh(createChamferedBoxGeo(0.005, 0.024, 0.007, 0.001, true, 0xd0d6de), mats.metal);
+  trigBlade.position.set(0, -0.010, 0.002);
+  s.triggerPivot.position.set(0, 0.036, 0.048);
+  s.triggerPivot.add(trigBlade);
 
-    const legMerged = safeMergeGeometries([legUpper, legLower, legCollar, legFoot]);
-    legMerged.rotateX(0.32); // Slight forward deployment stance
-    legMerged.rotateZ(side * 0.24); // Twin-leg lateral splay
-    legMerged.translate(side * 0.015, 0.042, 0.472);
-    bipodGeos.push(legMerged);
-  }
-  root.add(makePart(safeMergeGeometries(bipodGeos), mats.anodizedAluminum, 'AWM_Tactical_Bipod'));
-  s.laserOrigin.position.set(0.026, 0.075, 0.49);
+  // Visible .338 Chamber Round + Detachable 5-Round Windowed Steel Box Magazine
+  const chamberRound = createCartridgeMesh(0.068, 0.0068, mats.ammoAccent);
+  chamberRound.position.set(-0.012, 0.094, 0.132);
+  root.add(chamberRound);
 
-  // 6. Detachable 5-Round Steel Witness-Window Box Magazine (Mag_Pivot — 1-to-1 live .338 brass stack!)
-  s.magPivot.position.set(0, 0.036, 0.145);
-  const liveAmmo = buildWindowedMagazineGroup(s.magPivot, {
-    spineZY: [
-      [0, 0.015],
-      [0, -0.028],
-      [0, -0.072],
-    ],
-    widthX: 0.027,
-    depthZ: 0.084,
-    caliber: '338',
-    stackSlots: 5,
-    bodyMat: mats.gunmetalSteel,
-    windowMat: mats.smokedMagWindow,
-    mats,
-    namePrefix: 'AWM_5Rnd_WindowMag',
-    ribCount: 0,
+  const mag = buildWindowedMagazine(mats, {
+    width: 0.026,
+    depth: 0.088,
+    height: 0.118,
+    curveAngle: 0.0,
+    slots: 5,
+    bodyHex: 0x383e45,
+    cartLen: 0.068,
+    cartRad: 0.0064,
   });
+  s.magPivot.position.set(0, 0.036, 0.145);
+  s.magPivot.add(mag.group);
 
-  // 7. Articulated Lift-Pull-Push Precision Bolt Handle (Bolt_Or_Slide)
-  // Pivots cleanly around barrel centerline (0, 0.098, 0.05) so rotating Z lifts handle 60°!
-  s.boltOrSlide.position.set(0, 0.098, 0.05);
-  const boltGeos: THREE.BufferGeometry[] = [];
-  const boltBody = createLatheAlongZ(
-    [
-      [0.0115, -0.045],
-      [0.0115, 0.088],
-    ],
-    14
-  );
-  boltGeos.push(boltBody);
-  const stem = new THREE.CylinderGeometry(0.004, 0.004, 0.048, 10);
-  stem.rotateZ(Math.PI / 2 - 0.35);
-  stem.translate(-0.025, -0.008, -0.024);
-  boltGeos.push(stem);
-  const knob = new THREE.SphereGeometry(0.0092, 12, 10);
-  knob.translate(-0.047, -0.016, -0.028);
-  boltGeos.push(knob);
-  s.boltOrSlide.add(makePart(safeMergeGeometries(boltGeos), mats.chromeSteel, 'AWM_Bolt_Assembly'));
-  s.ejectionPort.position.set(-0.026, 0.1, 0.125);
+  s.gripRight.position.set(0, -0.010, -0.028);
+  s.gripLeft.position.set(0, 0.046, 0.340);
+  s.muzzleSocket.position.set(0, 0.098, 0.928);
+  s.ejectionPortSocket.position.set(-0.024, 0.100, 0.125);
+  s.laserSocket.position.set(0.024, 0.096, 0.435);
+  s.opticEyeSocket.position.set(0, 0.156, -0.095);
+  s.weaponLightSocket.position.set(-0.024, 0.096, 0.435);
 
-  // Gleaming .338 Lapua Magnum cartridge visible in open receiver breech during bolt pull!
-  const awmBreech = createCartridgeGroup(mats, '338', 'AWM_Breech_Round');
-  awmBreech.position.set(-0.012, 0.098, 0.14);
-  awmBreech.visible = false;
-  root.add(awmBreech);
-  liveAmmo.breechRound = awmBreech;
-
-  // Trigger guard & match trigger
-  const guardGeo = createSideExtrudeGeo(
-    [
-      [0.018, 0.048],
-      [0.024, 0.016],
-      [0.082, 0.016],
-      [0.088, 0.048],
-      [0.082, 0.048],
-      [0.076, 0.022],
-      [0.03, 0.022],
-      [0.024, 0.048],
-    ],
-    0.012,
-    0.0012,
-    0.0012
-  );
-  root.add(makePart(guardGeo, mats.gunmetalSteel, 'AWM_Trigger_Guard'));
-
-  s.triggerPivot.position.set(0, 0.046, 0.05);
-  const trigGeo = createSideExtrudeGeo(
-    [
-      [0.002, 0],
-      [-0.003, -0.011],
-      [-0.001, -0.022],
-      [0.003, -0.022],
-      [0.002, -0.011],
-      [0.005, 0],
-    ],
-    0.005,
-    0.0007,
-    0.0007
-  );
-  s.triggerPivot.add(makePart(trigGeo, mats.chromeSteel, 'AWM_Match_Trigger'));
-
-  return {
-    id: 'awm',
-    root,
-    ...s,
-    boltRestPos: s.boltOrSlide.position.clone(),
-    boltRestRot: s.boltOrSlide.rotation.clone(),
-    magRestPos: s.magPivot.position.clone(),
-    magRestRot: s.magPivot.rotation.clone(),
-    boltTravelMax: 0.095,
-    boltLiftMax: (60 * Math.PI) / 180,
-    liveAmmo,
-    dispose: collectDispose(root),
-  };
+  return finalizeWeapon('awm', root, s, 0.098, Math.PI / 3, {
+    magRounds: mag.rounds,
+    magFollower: mag.follower,
+    followerBottomY: mag.botY,
+    followerTopY: mag.topY,
+    chamberRound,
+  });
 }
 
 // ============================================================================
-// [5] TACTICAL GLOCK 19 GEN5 SIDEARM (9x19mm)
+// [5] GLOCK 19 GEN5 TACTICAL (9x19mm) — Beveled RMR Optic + Weaponlight Socket
 // ============================================================================
-export function buildGlock19(mats: WeaponMaterialLibrary): BuiltWeapon {
+export function buildGlock19(mats: WeaponMaterials): BuiltWeapon {
   const root = new THREE.Group();
-  root.name = 'Weapon_Glock19_Tactical';
-  const s = createSockets(root);
+  root.name = 'Weapon_Glock19_Tac';
+  const s = createWeaponSockets(root);
 
-  // 1. Diamond-Stippled Ergonomic Polymer Frame (clean OPEN undercut trigger window!) + Flared Magwell
-  const frameProfile: [number, number][] = [
-    [-0.024, 0.044],
-    [0.148, 0.044],
-    [0.148, 0.031],
-    [0.02, 0.031], // Undercut bridge stays above open trigger window!
-    [0.016, 0.014],
-    [0.006, -0.058],
-    [-0.036, -0.056],
-    [-0.026, 0.022],
-    [-0.036, 0.038], // Beavertail tang
-  ];
-  root.add(
-    makePart(
-      createSideExtrudeGeo(frameProfile, 0.0285, 0.003, 0.003, 2),
-      mats.stippledGrip,
-      'G19_Polymer_Frame'
-    )
+  // Beveled Polymer Frame & Ergonomic 22-Degree Grip
+  const frame = new THREE.Mesh(
+    createBeveledProfileGeo(
+      [
+        [-0.034, 0.048],
+        [0.142, 0.048],
+        [0.142, 0.024],
+        [0.088, 0.024],
+        [0.080, -0.002],
+        [0.028, -0.002],
+        [0.018, 0.020],
+        [-0.012, -0.072],
+        [-0.056, -0.064],
+        [-0.028, 0.032],
+      ],
+      0.029,
+      0.0028,
+      [
+        [
+          [0.034, 0.024],
+          [0.076, 0.024],
+          [0.072, 0.005],
+          [0.034, 0.005],
+        ],
+      ],
+      false,
+      0x2c3036
+    ),
+    mats.polymer
   );
+  root.add(frame);
 
-  // Sculpted squared Glock undercut trigger guard loop (clean open aperture showing curved trigger!)
-  const guardBow = createSideExtrudeGeo(
-    [
-      [0.018, 0.033],
-      [0.024, 0.008],
-      [0.086, 0.008],
-      [0.09, 0.033],
-      [0.081, 0.033],
-      [0.078, 0.014],
-      [0.03, 0.014],
-      [0.025, 0.033],
-    ],
-    0.0135,
-    0.0014,
-    0.0014
+  // Trigger blade
+  const trigBlade = new THREE.Mesh(createChamferedBoxGeo(0.006, 0.020, 0.006, 0.001, false, 0x22262b), mats.polymer);
+  trigBlade.position.set(0, -0.008, 0.002);
+  s.triggerPivot.position.set(0, 0.024, 0.052);
+  s.triggerPivot.add(trigBlade);
+
+  // Fixed Threaded Steel Barrel
+  const barrel = new THREE.Mesh(createBarrelGeo(0.0072, 0.0076, 0.132, 10, true, 0xd4dae2), mats.metal);
+  barrel.position.set(0, 0.060, 0.092);
+  root.add(barrel);
+
+  // Reciprocating Chamfered Steel Slide + Beveled Trijicon RMR Micro Red-Dot + AR Iridescent Lens!
+  const slide = new THREE.Mesh(
+    createChamferedBoxGeo(0.027, 0.028, 0.172, 0.0024, true, 0xc8ced6),
+    mats.metal
   );
-  root.add(makePart(guardBow, mats.tacticalPolymer, 'G19_Trigger_Guard'));
+  slide.position.set(0, 0.062, 0.054);
+  s.boltOrSlide.add(slide);
 
-  // Flared tactical aluminum magwell funnel
-  const magwell = createSideExtrudeGeo(
-    [
-      [-0.041, -0.064],
-      [0.011, -0.066],
-      [0.009, -0.053],
-      [-0.037, -0.051],
-    ],
-    0.034,
-    0.0022,
-    0.0022
+  const rmrHood = new THREE.Mesh(
+    createBeveledOpticHoodGeo(0.027, 0.022, 0.019, 0.015, 0.038, 0.0016, 0xc2c8d0),
+    mats.metal
   );
-  root.add(makePart(magwell, mats.anodizedAluminum, 'G19_Flared_Magwell'));
+  rmrHood.position.set(0, 0.086, 0.012);
+  s.boltOrSlide.add(rmrHood);
 
-  // Support hand Grip_Left target (modern thumbs-forward two-handed pistol grip!)
-  s.gripLeft.position.set(0.016, -0.006, 0.012);
+  const rmrLens = new THREE.Mesh(new THREE.PlaneGeometry(0.018, 0.014), mats.opticGlass);
+  rmrLens.position.set(0, 0.086, 0.012);
+  s.boltOrSlide.add(rmrLens);
 
-  // 2. Match Threaded Barrel + Exposed Silver Chrome Chamber Hood visible inside right ejection port!
-  const barrelGeo = createLatheAlongZ(
-    [
-      [0.0068, 0.046],
-      [0.0068, 0.168],
-      [0.0076, 0.17], // Thread protector knurling
-      [0.0076, 0.181],
-      [0.0046, 0.181],
-      [0.0046, 0.155],
-    ],
-    16
+  const rmrDot = new THREE.Mesh(
+    createChamferedBoxGeo(0.0026, 0.0026, 0.0015, 0.0004, false, 0xff2e2e),
+    mats.ammoAccent
   );
-  barrelGeo.translate(0, 0.06, 0);
-  const chamberHood = new THREE.BoxGeometry(0.022, 0.014, 0.036);
-  chamberHood.translate(-0.004, 0.066, 0.066);
-  root.add(
-    makePart(safeMergeGeometries([barrelGeo, chamberHood]), mats.chromeSteel, 'G19_Threaded_Barrel')
-  );
-  s.muzzleTip.position.set(0, 0.06, 0.185);
-  s.ejectionPort.position.set(-0.018, 0.066, 0.068);
-
-  // 3. Precision-Milled Matte-Steel Beveled Slide (Bolt_Or_Slide) + Front/Rear Serrations + Tritium + RMR!
-  s.boltOrSlide.position.set(0, 0.059, 0.064);
-
-  const slideBody = createSideExtrudeGeo(
-    [
-      [-0.095, -0.014],
-      [0.093, -0.014],
-      [0.093, 0.012],
-      [0.087, 0.015],
-      [-0.09, 0.015],
-      [-0.095, 0.011],
-    ],
-    0.0268,
-    0.0024,
-    0.0024,
-    2
-  );
-  s.boltOrSlide.add(makePart(slideBody, mats.bluedSteel, 'G19_Milled_Slide'));
-
-  // Crisp angled front & rear cocking serrations on both sides of slide
-  const serrationGeos: THREE.BufferGeometry[] = [];
-  for (const side of [-1, 1]) {
-    // Rear serrations (7 grooves)
-    for (let i = 0; i < 7; i++) {
-      const groove = new THREE.BoxGeometry(0.0024, 0.021, 0.0028);
-      groove.rotateX(0.16);
-      groove.translate(side * 0.0136, 0.0, -0.076 + i * 0.0062);
-      serrationGeos.push(groove);
-    }
-    // Front tactical press-check serrations (5 grooves)
-    for (let i = 0; i < 5; i++) {
-      const groove = new THREE.BoxGeometry(0.0024, 0.02, 0.0028);
-      groove.rotateX(0.16);
-      groove.translate(side * 0.0136, 0.0, 0.05 + i * 0.0062);
-      serrationGeos.push(groove);
-    }
-  }
-  s.boltOrSlide.add(
-    makePart(safeMergeGeometries(serrationGeos), mats.gunmetalSteel, 'G19_Slide_Serrations')
-  );
-
-  // Glowing 3-Dot Tritium Suppressor-Height Iron Sights
-  const ironGeos: THREE.BufferGeometry[] = [];
-  const rearL = new THREE.BoxGeometry(0.0055, 0.0085, 0.007);
-  rearL.translate(0.0065, 0.0185, -0.086);
-  ironGeos.push(rearL);
-  const rearR = new THREE.BoxGeometry(0.0055, 0.0085, 0.007);
-  rearR.translate(-0.0065, 0.0185, -0.086);
-  ironGeos.push(rearR);
-  const frontBlade = new THREE.BoxGeometry(0.0038, 0.009, 0.009);
-  frontBlade.translate(0, 0.0185, 0.084);
-  ironGeos.push(frontBlade);
-  s.boltOrSlide.add(makePart(safeMergeGeometries(ironGeos), mats.anodizedAluminum, 'G19_Iron_Sights'));
-
-  // 3 glowing tritium dots
-  for (const [tx, ty, tz] of [
-    [0.0065, 0.0205, -0.09],
-    [-0.0065, 0.0205, -0.09],
-    [0, 0.0205, 0.079],
-  ]) {
-    s.boltOrSlide.add(
-      makePart(new THREE.SphereGeometry(0.0014, 8, 8), mats.tritiumGreen, 'G19_Tritium_Dot', [
-        tx,
-        ty,
-        tz,
-      ])
-    );
-  }
-
-  // Compact RMR Micro-Red-Dot Optic mounted on milled slide cut!
-  const rmrGeos: THREE.BufferGeometry[] = [];
-  const rmrBase = new THREE.BoxGeometry(0.026, 0.006, 0.042);
-  rmrBase.translate(0, 0.0175, -0.052);
-  rmrGeos.push(rmrBase);
-  for (const side of [-1, 1]) {
-    const post = new THREE.BoxGeometry(0.0032, 0.018, 0.014);
-    post.translate(side * 0.0115, 0.028, -0.044);
-    rmrGeos.push(post);
-  }
-  const rmrArch = new THREE.BoxGeometry(0.026, 0.0032, 0.014);
-  rmrArch.translate(0, 0.037, -0.044);
-  rmrGeos.push(rmrArch);
-  s.boltOrSlide.add(makePart(safeMergeGeometries(rmrGeos), mats.anodizedAluminum, 'G19_RMR_Optic'));
-
-  const rmrGlass = makePart(
-    new THREE.PlaneGeometry(0.019, 0.014),
-    mats.opticGlass,
-    'G19_RMR_Glass',
-    [0, 0.0285, -0.044]
-  );
-  rmrGlass.castShadow = false;
-  s.boltOrSlide.add(rmrGlass);
-
-  const rmrDot = makePart(
-    new THREE.PlaneGeometry(0.012, 0.012),
-    mats.reticleRedDot,
-    'G19_RMR_RedDot',
-    [0, 0.0285, -0.045]
-  );
-  rmrDot.castShadow = false;
+  rmrDot.position.set(0, 0.086, 0.010);
   s.boltOrSlide.add(rmrDot);
 
-  // 4. Compact Under-Rail Tactical Weapon Flashlight (SureFire X300 / TLR-7 style)
-  const lightBody = createLatheAlongZ(
-    [
-      [0.0105, 0.09],
-      [0.011, 0.142],
-      [0.0126, 0.146], // Bezel head
-      [0.0126, 0.165],
-      [0.01, 0.165],
-    ],
-    16
+  // Underbarrel SureFire X300 Tactical Weaponlight Housing + AR Bezel Lens
+  const lightBody = new THREE.Mesh(
+    createChamferedBoxGeo(0.028, 0.024, 0.072, 0.0024, true, 0xbec4cc),
+    mats.metal
   );
-  lightBody.translate(0, 0.022, 0);
-  const lightClamp = new THREE.BoxGeometry(0.024, 0.012, 0.036);
-  lightClamp.translate(0, 0.031, 0.116);
-  root.add(
-    makePart(safeMergeGeometries([lightBody, lightClamp]), mats.anodizedAluminum, 'G19_Weapon_Light')
-  );
-  root.add(
-    makePart(new THREE.CircleGeometry(0.0098, 16), mats.flashlightLens, 'G19_Flashlight_Lens', [
-      0, 0.022, 0.166,
-    ])
-  );
-  s.laserOrigin.position.set(0, 0.022, 0.168);
+  lightBody.position.set(0, 0.012, 0.122);
+  root.add(lightBody);
 
-  // 5. Flush 15-Round Witness-Window Steel Drop Magazine (Mag_Pivot — live 9mm brass stack + Gen5 orange follower!)
-  s.magPivot.position.set(0, -0.004, -0.012);
-  const liveAmmo = buildWindowedMagazineGroup(s.magPivot, {
-    spineZY: [
-      [0.008, 0.04],
-      [0.002, -0.012],
-      [-0.006, -0.062],
-    ],
-    widthX: 0.022,
-    depthZ: 0.033,
-    caliber: '9mm',
-    stackSlots: 8,
-    bodyMat: mats.gunmetalSteel,
-    windowMat: mats.smokedMagWindow,
-    mats,
-    namePrefix: 'G19_15Rnd_WindowMag',
-    ribCount: 0,
+  const lightBezel = new THREE.Mesh(createBarrelGeo(0.011, 0.011, 0.012, 10, true, 0xd8dee6), mats.metal);
+  lightBezel.position.set(0, 0.012, 0.160);
+  root.add(lightBezel);
+
+  const lightGlass = new THREE.Mesh(new THREE.CircleGeometry(0.0095, 10), mats.opticGlass);
+  lightGlass.position.set(0, 0.012, 0.167);
+  root.add(lightGlass);
+
+  // Visible 9mm Chamber Round + Detachable 15-Round Witness-Window Magazine
+  const chamberRound = createCartridgeMesh(0.026, 0.0046, mats.ammoAccent);
+  chamberRound.position.set(-0.008, 0.062, 0.065);
+  root.add(chamberRound);
+
+  const mag = buildWindowedMagazine(mats, {
+    width: 0.021,
+    depth: 0.032,
+    height: 0.106,
+    curveAngle: -0.26,
+    slots: 6,
+    bodyHex: 0x262a2f,
+    cartLen: 0.026,
+    cartRad: 0.0044,
   });
+  s.magPivot.position.set(0, 0.022, -0.012);
+  s.magPivot.add(mag.group);
 
-  // Live 9mm breech cartridge visible inside open slide ejection port when cycling (absent on empty slide-lock!)
-  const g19Breech = createCartridgeGroup(mats, '9mm', 'G19_Breech_Round');
-  g19Breech.position.set(-0.004, 0.064, 0.056);
-  g19Breech.visible = false;
-  root.add(g19Breech);
-  liveAmmo.breechRound = g19Breech;
+  s.gripRight.position.set(0, -0.012, -0.018);
+  s.gripLeft.position.set(0.008, -0.010, -0.004);
+  s.muzzleSocket.position.set(0, 0.060, 0.162);
+  s.ejectionPortSocket.position.set(-0.018, 0.064, 0.064);
+  s.laserSocket.position.set(0, 0.012, 0.172);
+  s.opticEyeSocket.position.set(0, 0.086, -0.028);
+  s.weaponLightSocket.position.set(0, 0.012, 0.172);
 
-  // 6. Articulated Glock Safe-Action Trigger
-  s.triggerPivot.position.set(0, 0.034, 0.056);
-  const trigGeo = createSideExtrudeGeo(
-    [
-      [0.002, 0],
-      [-0.005, -0.01],
-      [-0.002, -0.019],
-      [0.003, -0.019],
-      [0.001, -0.01],
-      [0.006, 0],
-    ],
-    0.006,
-    0.0007,
-    0.0007
-  );
-  s.triggerPivot.add(makePart(trigGeo, mats.tacticalPolymer, 'G19_SafeAction_Trigger'));
+  return finalizeWeapon('glock19', root, s, 0.044, 0, {
+    magRounds: mag.rounds,
+    magFollower: mag.follower,
+    followerBottomY: mag.botY,
+    followerTopY: mag.topY,
+    chamberRound,
+  });
+}
 
+export function buildAllWeapons(mats: WeaponMaterials): Record<WeaponId, BuiltWeapon> {
   return {
-    id: 'glock19',
-    root,
-    ...s,
-    boltRestPos: s.boltOrSlide.position.clone(),
-    boltRestRot: s.boltOrSlide.rotation.clone(),
-    magRestPos: s.magPivot.position.clone(),
-    magRestRot: s.magPivot.rotation.clone(),
-    boltTravelMax: 0.044,
-    boltLiftMax: 0,
-    liveAmmo,
-    dispose: collectDispose(root),
+    mk18: buildMK18(mats),
+    ak74m: buildAK74M(mats),
+    m870: buildM870(mats),
+    awm: buildAWM(mats),
+    glock19: buildGlock19(mats),
   };
 }
 
-export function buildWeaponById(id: WeaponId, mats: WeaponMaterialLibrary): BuiltWeapon {
-  switch (id) {
-    case 'mk18':
-      return buildMK18(mats);
-    case 'ak74m':
-      return buildAK74M(mats);
-    case 'm870':
-      return buildM870Shotgun(mats);
-    case 'awm':
-      return buildAWMSniper(mats);
-    case 'glock19':
-      return buildGlock19(mats);
-  }
-}
+export const buildWeaponArsenal = buildAllWeapons;
 
-export function buildWeaponArsenal(mats: WeaponMaterialLibrary): Record<WeaponId, BuiltWeapon> {
-  const arsenal = {} as Record<WeaponId, BuiltWeapon>;
-  for (const id of WEAPON_ORDER) {
-    arsenal[id] = buildWeaponById(id, mats);
-  }
-  return arsenal;
-}
+export { WEAPON_ORDER };

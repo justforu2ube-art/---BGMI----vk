@@ -1,6 +1,5 @@
 import * as THREE from 'three';
-import { CharacterRig } from './rig';
-import { FACIAL_MORPH_NAMES, FacialMorphName } from './headSculpt';
+import { CharacterRig, resolveBoneName } from './rig';
 
 export const ANIMATION_NAMES = [
   'Idle_Natural',
@@ -18,206 +17,134 @@ export const ANIMATION_NAMES = [
 
 export type AnimationName = (typeof ANIMATION_NAMES)[number];
 
-interface PoseFrame {
+export interface AnimationClipMeta {
+  name: AnimationName;
+  label: string;
+  category: 'Locomotion' | 'Combat';
+  duration: number;
+  loop: boolean;
+}
+
+export const ANIMATION_CLIP_METAS: AnimationClipMeta[] = [
+  { name: 'Idle_Natural', label: 'Idle Natural', category: 'Locomotion', duration: 3.6, loop: true },
+  { name: 'Walk_Casual_GTA', label: 'Walk Casual', category: 'Locomotion', duration: 1.05, loop: true },
+  { name: 'Jog_Tactical', label: 'Jog Tactical', category: 'Locomotion', duration: 0.72, loop: true },
+  { name: 'Sprint_Combat', label: 'Sprint Combat', category: 'Combat', duration: 0.56, loop: true },
+  { name: 'Crouch_Idle', label: 'Crouch Idle', category: 'Combat', duration: 2.6, loop: true },
+  { name: 'Crouch_Walk', label: 'Crouch Walk', category: 'Combat', duration: 1.15, loop: true },
+  { name: 'Strafe_Left', label: 'Strafe Left', category: 'Combat', duration: 0.85, loop: true },
+  { name: 'Strafe_Right', label: 'Strafe Right', category: 'Combat', duration: 0.85, loop: true },
+  { name: 'Combat_Aim_Stance', label: 'Combat Aim', category: 'Combat', duration: 2.4, loop: true },
+  { name: 'Combat_Fire_Burst', label: 'Fire Burst', category: 'Combat', duration: 0.65, loop: true },
+  { name: 'Jump_Action', label: 'Jump Action', category: 'Locomotion', duration: 1.0, loop: false },
+];
+
+type PoseSample = {
   pelvisOffset?: [number, number, number];
-  /** Euler [x,y,z] rotations for spine/legs/head/fingers */
   rot: Record<string, [number, number, number]>;
-  /** Exact quaternion overrides (used by analytical 2-bone arm IK solver!) */
-  quat?: Record<string, THREE.Quaternion>;
-  morph?: Partial<Record<FacialMorphName, number>>;
+  morphs?: Record<string, number>;
+};
+
+const UPPER_BODY_BONES = new Set<string>([
+  'spine_02',
+  'spine_03',
+  'neck_01',
+  'head',
+  'clavicle_l',
+  'upperarm_l',
+  'upperarm_twist_01_l',
+  'lowerarm_l',
+  'lowerarm_twist_01_l',
+  'hand_l',
+  'clavicle_r',
+  'upperarm_r',
+  'upperarm_twist_01_r',
+  'lowerarm_r',
+  'lowerarm_twist_01_r',
+  'hand_r',
+  'thumb_01_l', 'thumb_02_l', 'thumb_03_l',
+  'index_01_l', 'index_02_l', 'index_03_l',
+  'middle_01_l', 'middle_02_l', 'middle_03_l',
+  'ring_01_l', 'ring_02_l', 'ring_03_l',
+  'pinky_01_l', 'pinky_02_l', 'pinky_03_l',
+  'thumb_01_r', 'thumb_02_r', 'thumb_03_r',
+  'index_01_r', 'index_02_r', 'index_03_r',
+  'middle_01_r', 'middle_02_r', 'middle_03_r',
+  'ring_01_r', 'ring_02_r', 'ring_03_r',
+  'pinky_01_r', 'pinky_02_r', 'pinky_03_r',
+]);
+
+function eulerToQuatArray(rx: number, ry: number, rz: number): [number, number, number, number] {
+  const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(rx, ry, rz, 'XYZ'));
+  return [q.x, q.y, q.z, q.w];
 }
 
-const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
-const _quat = new THREE.Quaternion();
-
-/**
- * Analytical 2-Bone Arm IK Solver in chest-local / bind space!
- * Eliminates all A-pose Euler sign ambiguity: given desired hand offset from shoulder
- * and an elbow pole hint, computes exact UpperArm and Forearm local quaternions!
- */
-function solveArmIK(
-  rig: CharacterRig,
-  side: 'L' | 'R',
-  handRelShoulder: [number, number, number],
-  elbowPoleRelShoulder: [number, number, number]
-): { upperQ: THREE.Quaternion; forearmQ: THREE.Quaternion } {
-  const pS = rig.bindWorldPos.get(`UpperArm_${side}`)!;
-  const pE = rig.bindWorldPos.get(`Forearm_${side}`)!;
-  const pH = rig.bindWorldPos.get(`Hand_${side}`)!;
-
-  const vUpperBind = pE.clone().sub(pS);
-  const vForeBind = pH.clone().sub(pE);
-  const L1 = vUpperBind.length();
-  const L2 = vForeBind.length();
-  const u1Bind = vUpperBind.clone().normalize();
-  const u2Bind = vForeBind.clone().normalize();
-
-  const target = new THREE.Vector3(...handRelShoulder);
-  const maxReach = (L1 + L2) * 0.992;
-  const minReach = Math.abs(L1 - L2) + 0.04;
-  let dist = target.length();
-  if (dist > maxReach) {
-    target.multiplyScalar(maxReach / dist);
-    dist = maxReach;
-  } else if (dist < minReach) {
-    target.normalize().multiplyScalar(minReach);
-    dist = minReach;
-  }
-
-  // Law of cosines for shoulder angle alpha between target vector and upper arm
-  const cosAlpha = Math.max(-1, Math.min(1, (L1 * L1 + dist * dist - L2 * L2) / (2 * L1 * dist)));
-  const alpha = Math.acos(cosAlpha);
-
-  const tDir = target.clone().normalize();
-  const pole = new THREE.Vector3(...elbowPoleRelShoulder);
-  // Project pole perpendicular to target vector
-  const bendDir = pole.sub(tDir.clone().multiplyScalar(pole.dot(tDir)));
-  if (bendDir.lengthSq() < 1e-6) bendDir.set(0, -1, 0);
-  bendDir.normalize();
-
-  // Desired elbow & hand directions in parent space
-  const u1Des = tDir
-    .clone()
-    .multiplyScalar(Math.cos(alpha))
-    .addScaledVector(bendDir, Math.sin(alpha))
-    .normalize();
-  const elbowPos = u1Des.clone().multiplyScalar(L1);
-  const u2Des = target.clone().sub(elbowPos).normalize();
-
-  // UpperArm rotation maps u1Bind -> u1Des with twist aligned so arm plane stays natural
-  const upperQ = new THREE.Quaternion().setFromUnitVectors(u1Bind, u1Des);
-
-  // Align upper arm roll slightly so elbow bends cleanly without shoulder twist
-  const bindBendNormal = new THREE.Vector3(0, 0, -1); // anatomical elbow back
-  const curBendNormal = bindBendNormal.clone().applyQuaternion(upperQ);
-  const projCur = curBendNormal.sub(u1Des.clone().multiplyScalar(curBendNormal.dot(u1Des)));
-  const projDes = bendDir.clone().sub(u1Des.clone().multiplyScalar(bendDir.dot(u1Des)));
-  if (projCur.lengthSq() > 1e-5 && projDes.lengthSq() > 1e-5) {
-    projCur.normalize();
-    projDes.normalize();
-    const twistQ = new THREE.Quaternion().setFromUnitVectors(projCur, projDes);
-    upperQ.premultiply(twistQ);
-  }
-
-  // Forearm local rotation: maps u2Bind -> upperQ^-1 * u2Des
-  const u2DesLocal = u2Des.clone().applyQuaternion(upperQ.clone().invert()).normalize();
-  const forearmQ = new THREE.Quaternion().setFromUnitVectors(u2Bind, u2DesLocal);
-
-  return { upperQ, forearmQ };
-}
-
-/** Helper to set natural finger curl across all 5 fingers on one hand */
-function applyFingerCurl(
-  rot: Record<string, [number, number, number]>,
-  side: 'L' | 'R',
-  amount: number,
-  triggerPose = false
-) {
-  const s = side === 'L' ? 1 : -1;
-  const curl = (v: number): [number, number, number] => [0, 0, -v * s];
-
-  const fingers = ['Index', 'Middle', 'Ring', 'Pinky'] as const;
-  fingers.forEach((f, idx) => {
-    let c = amount * (0.85 + idx * 0.14);
-    if (triggerPose && f === 'Index' && side === 'R') {
-      c = 0.62;
-    }
-    rot[`${f}_01_${side}`] = curl(c * 0.65);
-    rot[`${f}_02_${side}`] = curl(c * 0.92);
-    rot[`${f}_03_${side}`] = curl(c * 0.68);
-  });
-
-  const thumbC = amount * 0.55;
-  rot[`Thumb_01_${side}`] = [-0.18 * thumbC, 0.25 * s * thumbC, -0.32 * s * thumbC];
-  rot[`Thumb_02_${side}`] = [-0.12 * thumbC, 0, -0.45 * s * thumbC];
-  rot[`Thumb_03_${side}`] = [0, 0, -0.42 * s * thumbC];
-}
-
-function calcGroundedPelvisDrop(
-  thighL: number,
-  kneeL: number,
-  thighR: number,
-  kneeR: number
-): number {
-  const L1 = 0.43;
-  const L2 = 0.405;
-  const legHeight = (th: number, kn: number) => L1 * Math.cos(th) + L2 * Math.cos(th + kn);
-  const maxReach = Math.max(legHeight(thighL, kneeL), legHeight(thighR, kneeR));
-  return Math.min(0, maxReach - (L1 + L2));
-}
-
-function sampleClip(
-  name: AnimationName,
+function buildClipFromSampler(
+  name: string,
   duration: number,
-  fps: number,
   rig: CharacterRig,
-  evalPose: (u: number, t: number) => PoseFrame
+  sampleFn: (phase: number, time: number) => PoseSample,
+  fps = 30
 ): THREE.AnimationClip {
-  const steps = Math.max(8, Math.round(duration * fps));
+  const steps = Math.max(12, Math.round(duration * fps));
   const times: number[] = [];
-  const frames: PoseFrame[] = [];
-  const boneNameSet = new Set<string>();
-  const morphNameSet = new Set<FacialMorphName>();
+  const samples: PoseSample[] = [];
+  const boneSet = new Set<string>();
+  const morphSet = new Set<string>();
 
   for (let i = 0; i <= steps; i++) {
-    const u = i / steps;
-    const t = u * duration;
+    const phase = i / steps;
+    const t = phase * duration;
     times.push(t);
-    const f = evalPose(u, t);
-    frames.push(f);
-    for (const bn of Object.keys(f.rot)) {
-      if (rig.boneMap.has(bn)) boneNameSet.add(bn);
+    const s = sampleFn(phase, t);
+    // Normalize all bone keys to canonical UE5 snake_case names
+    const normalizedRot: Record<string, [number, number, number]> = {};
+    for (const [k, v] of Object.entries(s.rot)) {
+      const canonical = resolveBoneName(k);
+      normalizedRot[canonical] = v;
+      boneSet.add(canonical);
     }
-    if (f.quat) {
-      for (const bn of Object.keys(f.quat)) {
-        if (rig.boneMap.has(bn)) boneNameSet.add(bn);
-      }
+    s.rot = normalizedRot;
+    if (s.morphs) {
+      for (const m of Object.keys(s.morphs)) morphSet.add(m);
     }
-    if (f.morph) {
-      for (const mn of Object.keys(f.morph) as FacialMorphName[]) {
-        morphNameSet.add(mn);
-      }
-    }
+    samples.push(s);
   }
 
   const tracks: THREE.KeyframeTrack[] = [];
-  const pelvisBind = rig.boneMap.get('Pelvis')!.position;
 
-  const pelVals: number[] = [];
-  for (const f of frames) {
-    const off = f.pelvisOffset ?? [0, 0, 0];
-    pelVals.push(pelvisBind.x + off[0], pelvisBind.y + off[1], pelvisBind.z + off[2]);
+  // Pelvis position track
+  const pelvisRest = rig.getBone('pelvis')!.position.clone();
+  const posValues: number[] = [];
+  let hasPosDelta = false;
+  for (const s of samples) {
+    const off = s.pelvisOffset ?? [0, 0, 0];
+    if (off[0] !== 0 || off[1] !== 0 || off[2] !== 0) hasPosDelta = true;
+    posValues.push(pelvisRest.x + off[0], pelvisRest.y + off[1], pelvisRest.z + off[2]);
   }
-  tracks.push(new THREE.VectorKeyframeTrack('Pelvis.position', times, pelVals));
+  if (hasPosDelta) {
+    tracks.push(new THREE.VectorKeyframeTrack('pelvis.position', times, posValues));
+  }
 
-  for (const boneName of boneNameSet) {
-    const qVals: number[] = [];
-    for (const f of frames) {
-      if (f.quat && f.quat[boneName]) {
-        const q = f.quat[boneName];
-        qVals.push(q.x, q.y, q.z, q.w);
-      } else {
-        const r = f.rot[boneName] ?? [0, 0, 0];
-        _euler.set(r[0], r[1], r[2], 'YXZ');
-        _quat.setFromEuler(_euler);
-        qVals.push(_quat.x, _quat.y, _quat.z, _quat.w);
-      }
+  // Bone quaternion tracks at 30 fps
+  for (const boneName of boneSet) {
+    const values: number[] = [];
+    for (const s of samples) {
+      const e = s.rot[boneName] ?? [0, 0, 0];
+      const q = eulerToQuatArray(e[0], e[1], e[2]);
+      values.push(q[0], q[1], q[2], q[3]);
     }
-    tracks.push(new THREE.QuaternionKeyframeTrack(`${boneName}.quaternion`, times, qVals));
+    tracks.push(new THREE.QuaternionKeyframeTrack(`${boneName}.quaternion`, times, values));
   }
 
-  for (const morphName of FACIAL_MORPH_NAMES) {
-    if (!morphNameSet.has(morphName)) continue;
-    const mVals: number[] = [];
-    for (const f of frames) {
-      mVals.push(f.morph?.[morphName] ?? 0);
+  // Morph tracks strictly on SK_Head
+  for (const morphName of morphSet) {
+    const values: number[] = [];
+    for (const s of samples) {
+      values.push(s.morphs?.[morphName] ?? 0);
     }
     tracks.push(
-      new THREE.NumberKeyframeTrack(
-        `Head_Face_Mesh.morphTargetInfluences[${morphName}]`,
-        times,
-        mVals
-      )
+      new THREE.NumberKeyframeTrack(`SK_Head.morphTargetInfluences[${morphName}]`, times, values)
     );
   }
 
@@ -225,691 +152,473 @@ function sampleClip(
 }
 
 /**
- * Helper to apply analytical 2-bone IK arm targets for both L and R arms into a PoseFrame
+ * Helper to create natural relaxed finger curl in canonical UE5 Finger_Humanoid names
  */
-function setArmsIK(
-  rig: CharacterRig,
-  quat: Record<string, THREE.Quaternion>,
-  leftHand: [number, number, number],
-  leftPole: [number, number, number],
-  rightHand: [number, number, number],
-  rightPole: [number, number, number]
-) {
-  const L = solveArmIK(rig, 'L', leftHand, leftPole);
-  const R = solveArmIK(rig, 'R', rightHand, rightPole);
-  quat.UpperArm_L = L.upperQ;
-  quat.Forearm_L = L.forearmQ;
-  quat.UpperArm_R = R.upperQ;
-  quat.Forearm_R = R.forearmQ;
+function addFingerCurl(
+  rot: Record<string, [number, number, number]>,
+  side: 'l' | 'r',
+  curl: number,
+  thumbCurl = curl * 0.65
+): void {
+  const s = side === 'l' ? 1 : -1;
+  rot[`thumb_01_${side}`] = [0.22 * thumbCurl, -0.35 * s * thumbCurl, -0.25 * s * thumbCurl];
+  rot[`thumb_02_${side}`] = [0.18 * thumbCurl, -0.25 * s * thumbCurl, -0.22 * s * thumbCurl];
+  rot[`thumb_03_${side}`] = [0.14 * thumbCurl, -0.20 * s * thumbCurl, -0.18 * s * thumbCurl];
+  for (const f of ['index', 'middle', 'ring', 'pinky'] as const) {
+    const mult = f === 'index' ? 0.85 : f === 'middle' ? 1.0 : f === 'ring' ? 1.12 : 1.22;
+    rot[`${f}_01_${side}`] = [0, 0, -0.45 * s * curl * mult];
+    rot[`${f}_02_${side}`] = [0, 0, -0.58 * s * curl * mult];
+    rot[`${f}_03_${side}`] = [0, 0, -0.42 * s * curl * mult];
+  }
+}
+
+/**
+ * Extract ONLY upper-body tracks (`spine_02+`, arms, neck, head, fingers) from an aim clip
+ * for masked skeletal animation layering during ADS movement/strafing.
+ */
+export function createMaskedUpperBodyClip(source: THREE.AnimationClip): THREE.AnimationClip {
+  const upperTracks = source.tracks
+    .filter((t) => {
+      const bone = t.name.split('.')[0];
+      return UPPER_BODY_BONES.has(bone) || bone === 'SK_Head';
+    })
+    .map((t) => t.clone());
+  return new THREE.AnimationClip(`${source.name}_UpperMask`, source.duration, upperTracks);
+}
+
+/**
+ * Extract ONLY lower-body locomotion tracks (`pelvis`, `spine_01`, legs, feet) from a locomotion clip
+ * so strafing while holding ADS NEVER disturbs upper-body spine/weapon aim pitch!
+ */
+export function createMaskedLowerBodyClip(source: THREE.AnimationClip): THREE.AnimationClip {
+  const lowerTracks = source.tracks
+    .filter((t) => {
+      const bone = t.name.split('.')[0];
+      return !UPPER_BODY_BONES.has(bone) && bone !== 'SK_Head';
+    })
+    .map((t) => t.clone());
+  return new THREE.AnimationClip(`${source.name}_LowerMask`, source.duration, lowerTracks);
 }
 
 export function createCharacterAnimations(rig: CharacterRig): THREE.AnimationClip[] {
   const clips: THREE.AnimationClip[] = [];
 
-  // =========================================================================
-  // 1. Idle_Natural: Heroic relaxed stance (arms resting naturally near thighs),
-  //    rhythmic chest breathing, weight shift, natural blink & smirk!
-  // =========================================================================
+  // 1. Idle_Natural (breathing, subtle weight shift, micro-head scan & natural blink)
   clips.push(
-    sampleClip('Idle_Natural', 4.4, 30, rig, (u) => {
-      const w = u * Math.PI * 2;
-      const breath = Math.sin(w * 2);
-      const sway = Math.sin(w);
-      const scan = Math.sin(w - 0.5) * 0.09 + Math.sin(w * 2) * 0.025;
-      const blink = Math.exp(-Math.pow((u - 0.62) / 0.022, 2));
-      const eyeYaw = Math.sin(w * 2 + 0.8) * 0.065;
+    buildClipFromSampler('Idle_Natural', 3.6, rig, (p) => {
+      const a = p * Math.PI * 2;
+      const breath = Math.sin(a);
+      const sway = Math.sin(a * 0.5);
+      const blink =
+        p > 0.72 && p < 0.78 ? Math.sin(((p - 0.72) / 0.06) * Math.PI) : 0;
 
       const rot: Record<string, [number, number, number]> = {
-        Pelvis: [0.015, sway * 0.04, sway * 0.02],
-        Spine_01: [0.01 + breath * 0.01, -sway * 0.022, -sway * 0.014],
-        Spine_02: [-0.01 + breath * 0.014, -sway * 0.022, -sway * 0.01],
-        Chest: [-0.02 - breath * 0.018, -sway * 0.018, -sway * 0.008],
-        Neck: [0.015 + breath * 0.008, scan * 0.45, 0],
-        Head: [-0.01, scan * 0.55, -sway * 0.02],
-        Eye_L: [0, eyeYaw, 0],
-        Eye_R: [0, eyeYaw, 0],
-        Clavicle_L: [0, 0, -0.015 + breath * 0.014],
-        Clavicle_R: [0, 0, 0.015 - breath * 0.014],
-        Hand_L: [0.05, 0, -0.06],
-        Hand_R: [0.05, 0, 0.06],
-        Thigh_L: [-0.03, 0.06, 0.025 - sway * 0.015],
-        Calf_L: [0.06, 0, 0],
-        Foot_L: [-0.03, 0, -0.015],
-        Toe_L: [0, 0, 0],
-        Thigh_R: [-0.02, -0.06, -0.025 - sway * 0.015],
-        Calf_R: [0.05, 0, 0],
-        Foot_R: [-0.03, 0, 0.015],
-        Toe_R: [0, 0, 0],
+        pelvis: [0.02, sway * 0.03, sway * 0.015],
+        spine_01: [0.01 + breath * 0.014, -sway * 0.02, 0],
+        spine_02: [breath * 0.018, 0, 0],
+        spine_03: [breath * 0.022, -sway * 0.02, 0],
+        neck_01: [-0.02 - breath * 0.012, Math.sin(a) * 0.04, 0],
+        head: [0.02 - breath * 0.01, Math.sin(a) * 0.05, Math.cos(a) * 0.015],
+        clavicle_l: [0, 0, -0.04 + breath * 0.018],
+        clavicle_r: [0, 0, 0.04 - breath * 0.018],
+        upperarm_l: [0.08, 0.06, -1.24 - breath * 0.02],
+        lowerarm_l: [0.14, 0.24, -0.10],
+        hand_l: [0, 0.08, -0.06],
+        upperarm_r: [0.08, -0.06, 1.24 + breath * 0.02],
+        lowerarm_r: [0.14, -0.24, 0.10],
+        hand_r: [0, -0.08, 0.06],
+        thigh_l: [-0.04, 0.06, 0.03],
+        calf_l: [0.07, 0, 0],
+        foot_l: [-0.03, 0.05, -0.02],
+        thigh_r: [-0.03, -0.07, -0.03],
+        calf_r: [0.06, 0, 0],
+        foot_r: [-0.03, -0.05, 0.02],
       };
-
-      const quat: Record<string, THREE.Quaternion> = {};
-      setArmsIK(
-        rig,
-        quat,
-        [0.105 + breath * 0.006, -0.505, 0.075 + sway * 0.015],
-        [0.24, -0.25, -0.25],
-        [-0.105 - breath * 0.006, -0.505, 0.085 - sway * 0.015],
-        [-0.24, -0.25, -0.25]
-      );
-
-      applyFingerCurl(rot, 'L', 0.42);
-      applyFingerCurl(rot, 'R', 0.45);
-
+      addFingerCurl(rot, 'l', 0.45);
+      addFingerCurl(rot, 'r', 0.45);
       return {
-        pelvisOffset: [sway * 0.012, -0.003 + breath * 0.003, 0],
+        pelvisOffset: [sway * 0.008, -0.006 + breath * 0.004, 0],
         rot,
-        quat,
-        morph: {
-          Blink_L: blink,
-          Blink_R: blink,
-          Mouth_Smirk: 0.34 + Math.sin(w) * 0.05,
-          Brow_Focus: 0.14,
-        },
+        morphs: { Blink_L: blink, Blink_R: blink, Brow_Focus: 0.14, Mouth_Smirk: 0.30 },
       };
     })
   );
 
-  // =========================================================================
-  // 2. Walk_Casual_GTA: Confident natural athletic stride with opposing arm swing
-  // =========================================================================
+  // 3. Walk_Casual_GTA
   clips.push(
-    sampleClip('Walk_Casual_GTA', 1.08, 30, rig, (u) => {
-      const w = u * Math.PI * 2;
-      const sinW = Math.sin(w);
-      const cosW = Math.cos(w);
-
-      const thL = -0.34 * sinW - 0.06;
-      const knL = Math.max(0.05, 0.38 + 0.36 * Math.sin(w - 1.05));
-      const ftL = 0.24 * Math.sin(w - 1.65) - 0.04;
-      const toeL = Math.max(0, 0.26 * Math.sin(w - 2.35));
-
-      const thR = 0.34 * sinW - 0.06;
-      const knR = Math.max(0.05, 0.38 + 0.36 * Math.sin(w + Math.PI - 1.05));
-      const ftR = 0.24 * Math.sin(w + Math.PI - 1.65) - 0.04;
-      const toeR = Math.max(0, 0.26 * Math.sin(w + Math.PI - 2.35));
-
-      const dropY = calcGroundedPelvisDrop(thL, knL, thR, knR);
-      const bounceY = Math.abs(sinW) * 0.022;
-
+    buildClipFromSampler('Walk_Casual_GTA', 1.05, rig, (p) => {
+      const a = p * Math.PI * 2;
+      const s = Math.sin(a);
+      const c = Math.cos(a);
+      const bob = Math.abs(Math.sin(a)) * 0.028 - 0.022;
       const rot: Record<string, [number, number, number]> = {
-        Pelvis: [0.05, sinW * 0.11, -cosW * 0.045],
-        Spine_01: [0.03, -sinW * 0.07, cosW * 0.025],
-        Spine_02: [0.02, -sinW * 0.07, cosW * 0.02],
-        Chest: [0.01, -sinW * 0.08, cosW * 0.015],
-        Neck: [-0.03, sinW * 0.06, 0],
-        Head: [-0.03, sinW * 0.05, -cosW * 0.015],
-        Clavicle_L: [0, sinW * 0.05, -0.02],
-        Clavicle_R: [0, -sinW * 0.05, 0.02],
-        Hand_L: [0.10 * Math.sin(w - 0.5), 0, -0.05],
-        Hand_R: [-0.10 * Math.sin(w - 0.5), 0, 0.05],
-        Thigh_L: [thL, 0.02, 0.015],
-        Calf_L: [knL, 0, 0],
-        Foot_L: [ftL, 0, 0],
-        Toe_L: [-toeL, 0, 0],
-        Thigh_R: [thR, -0.02, -0.015],
-        Calf_R: [knR, 0, 0],
-        Foot_R: [ftR, 0, 0],
-        Toe_R: [-toeR, 0, 0],
+        pelvis: [0.04, -s * 0.09, s * 0.03],
+        spine_01: [0.02, s * 0.05, -s * 0.02],
+        spine_02: [0.02, s * 0.06, -s * 0.02],
+        spine_03: [0.02, s * 0.08, 0],
+        neck_01: [-0.02, -s * 0.06, 0],
+        head: [-0.02, -s * 0.06, 0],
+        upperarm_l: [0.08 - s * 0.34, 0.08, -1.26],
+        lowerarm_l: [0.18 + Math.max(0, -s) * 0.28, 0.25, -0.08],
+        upperarm_r: [0.08 + s * 0.34, -0.08, 1.26],
+        lowerarm_r: [0.18 + Math.max(0, s) * 0.28, -0.25, 0.08],
+        thigh_l: [-s * 0.44 - 0.04, 0.03, 0.02],
+        calf_l: [Math.max(0.05, -c * 0.62 + 0.22), 0, 0],
+        foot_l: [c * 0.22 - 0.05, 0, 0],
+        thigh_r: [s * 0.44 - 0.04, -0.03, -0.02],
+        calf_r: [Math.max(0.05, c * 0.62 + 0.22), 0, 0],
+        foot_r: [-c * 0.22 - 0.05, 0, 0],
       };
+      addFingerCurl(rot, 'l', 0.55);
+      addFingerCurl(rot, 'r', 0.55);
+      return { pelvisOffset: [s * 0.012, bob, 0], rot };
+    })
+  );
 
-      // Opposing natural arm swing along torso sides (Left arm forward when Right leg forward!)
-      const quat: Record<string, THREE.Quaternion> = {};
-      setArmsIK(
-        rig,
-        quat,
-        [0.095, -0.48 + Math.max(0, -sinW) * 0.08, 0.06 - sinW * 0.22],
-        [0.18, -0.24, -0.35 - sinW * 0.12],
-        [-0.095, -0.48 + Math.max(0, sinW) * 0.08, 0.06 + sinW * 0.22],
-        [-0.18, -0.24, -0.35 + sinW * 0.12]
-      );
-
-      applyFingerCurl(rot, 'L', 0.46);
-      applyFingerCurl(rot, 'R', 0.46);
-
+  // 3. Jog_Tactical
+  clips.push(
+    buildClipFromSampler('Jog_Tactical', 0.72, rig, (p) => {
+      const a = p * Math.PI * 2;
+      const s = Math.sin(a);
+      const c = Math.cos(a);
+      const bob = Math.abs(Math.sin(a)) * 0.055 - 0.045;
+      const rot: Record<string, [number, number, number]> = {
+        pelvis: [0.11, -s * 0.14, s * 0.04],
+        spine_01: [0.07, s * 0.09, -s * 0.03],
+        spine_02: [0.06, s * 0.09, -s * 0.02],
+        spine_03: [0.05, s * 0.11, 0],
+        neck_01: [-0.08, -s * 0.09, 0],
+        head: [-0.09, -s * 0.08, 0],
+        upperarm_l: [0.14 - s * 0.72, 0.14, -1.16],
+        lowerarm_l: [0.55 + Math.max(0, -s) * 0.48, 0.55, -0.18],
+        upperarm_r: [0.14 + s * 0.72, -0.14, 1.16],
+        lowerarm_r: [0.55 + Math.max(0, s) * 0.48, -0.55, 0.18],
+        thigh_l: [-s * 0.76 - 0.12, 0.02, 0.02],
+        calf_l: [Math.max(0.10, -c * 1.12 + 0.42), 0, 0],
+        foot_l: [c * 0.34 - 0.08, 0, 0],
+        thigh_r: [s * 0.76 - 0.12, -0.02, -0.02],
+        calf_r: [Math.max(0.10, c * 1.12 + 0.42), 0, 0],
+        foot_r: [-c * 0.34 - 0.08, 0, 0],
+      };
+      addFingerCurl(rot, 'l', 0.85);
+      addFingerCurl(rot, 'r', 0.85);
       return {
-        pelvisOffset: [cosW * 0.024, dropY + bounceY, 0],
+        pelvisOffset: [s * 0.016, bob, 0.015],
         rot,
-        quat,
-        morph: { Mouth_Smirk: 0.28, Brow_Focus: 0.18 },
+        morphs: { Brow_Focus: 0.38 },
       };
     })
   );
 
-  // =========================================================================
-  // 3. Jog_Tactical: Forward-leaning Battlegrounds jog, compact bent-arm pump
-  // =========================================================================
+  // 5. Sprint_Combat — Tactical Low-Ready Carry (ZERO chest clipping!)
+  // Arms project forward (hand_r forward clearance Z >= +0.28m from spine_03), muzzle pitched -0.45 rad down-left
   clips.push(
-    sampleClip('Jog_Tactical', 0.72, 30, rig, (u) => {
-      const w = u * Math.PI * 2;
-      const sinW = Math.sin(w);
-      const cosW = Math.cos(w);
-
-      const thL = -0.58 * sinW - 0.16;
-      const knL = Math.max(0.12, 0.65 + 0.56 * Math.sin(w - 1.1));
-      const ftL = 0.30 * Math.sin(w - 1.6) - 0.06;
-
-      const thR = 0.58 * sinW - 0.16;
-      const knR = Math.max(0.12, 0.65 + 0.56 * Math.sin(w + Math.PI - 1.1));
-      const ftR = 0.30 * Math.sin(w + Math.PI - 1.6) - 0.06;
-
-      const dropY = calcGroundedPelvisDrop(thL, knL, thR, knR);
-      const bounce = Math.abs(sinW) * 0.048 - 0.015;
-
+    buildClipFromSampler('Sprint_Combat', 0.56, rig, (p) => {
+      const a = p * Math.PI * 2;
+      const s = Math.sin(a);
+      const c = Math.cos(a);
+      const bob = Math.abs(Math.sin(a)) * 0.056 - 0.058;
+      const carryOsc = Math.sin(a * 2) * 0.04;
       const rot: Record<string, [number, number, number]> = {
-        Pelvis: [0.12, sinW * 0.14, -cosW * 0.04],
-        Spine_01: [0.08, -sinW * 0.09, cosW * 0.02],
-        Spine_02: [0.07, -sinW * 0.09, cosW * 0.02],
-        Chest: [0.05, -sinW * 0.11, 0],
-        Neck: [-0.14, sinW * 0.08, 0],
-        Head: [-0.14, sinW * 0.06, 0],
-        Clavicle_L: [0, sinW * 0.06, 0.01],
-        Clavicle_R: [0, -sinW * 0.06, -0.01],
-        Hand_L: [0.05, 0, -0.1],
-        Hand_R: [0.05, 0, 0.1],
-        Thigh_L: [thL, 0.02, 0.01],
-        Calf_L: [knL, 0, 0],
-        Foot_L: [ftL, 0, 0],
-        Toe_L: [-Math.max(0, 0.35 * Math.sin(w - 2.2)), 0, 0],
-        Thigh_R: [thR, -0.02, -0.01],
-        Calf_R: [knR, 0, 0],
-        Foot_R: [ftR, 0, 0],
-        Toe_R: [-Math.max(0, 0.35 * Math.sin(w + Math.PI - 2.2)), 0, 0],
+        pelvis: [0.15, -s * 0.14, s * 0.035],
+        spine_01: [0.08, s * 0.06, -s * 0.02],
+        spine_02: [0.06, s * 0.05, 0],
+        spine_03: [0.05, -0.08 + s * 0.04, 0],
+        neck_01: [-0.12, 0.05, 0],
+        head: [-0.14, 0.04, 0],
+        // Low-ready forward-clear tactical rifle carry: elbows clear of torso, hands well forward of chest
+        clavicle_r: [0.06, -0.14, 0.05],
+        upperarm_r: [-0.46 + carryOsc, -0.68, 0.76],
+        lowerarm_r: [0.22, -0.78, 0.24],
+        hand_r: [-0.32, 0.22, 0.12],
+        clavicle_l: [0.08, 0.16, -0.04],
+        upperarm_l: [-0.52 - carryOsc, 0.86, -0.72],
+        lowerarm_l: [0.28, 0.66, -0.18],
+        hand_l: [-0.20, -0.16, -0.10],
+        thigh_l: [-s * 0.88 - 0.16, 0.02, 0.02],
+        calf_l: [Math.max(0.12, -c * 1.24 + 0.48), 0, 0],
+        foot_l: [c * 0.36 - 0.08, 0, 0],
+        thigh_r: [s * 0.88 - 0.16, -0.02, -0.02],
+        calf_r: [Math.max(0.12, c * 1.24 + 0.48), 0, 0],
+        foot_r: [-c * 0.36 - 0.08, 0, 0],
       };
-
-      const quat: Record<string, THREE.Quaternion> = {};
-      setArmsIK(
-        rig,
-        quat,
-        [0.04 - sinW * 0.03, -0.26 - sinW * 0.08, 0.25 - sinW * 0.18],
-        [0.20, -0.30, -0.35],
-        [-0.04 - sinW * 0.03, -0.26 + sinW * 0.08, 0.25 + sinW * 0.18],
-        [-0.20, -0.30, -0.35]
-      );
-
-      applyFingerCurl(rot, 'L', 0.75);
-      applyFingerCurl(rot, 'R', 0.75);
-
+      addFingerCurl(rot, 'l', 0.92);
+      addFingerCurl(rot, 'r', 0.92);
       return {
-        pelvisOffset: [cosW * 0.022, dropY + bounce, 0],
+        pelvisOffset: [s * 0.014, bob, 0.028],
         rot,
-        quat,
-        morph: { Brow_Focus: 0.35, Nostril_Flare: 0.22 },
+        morphs: { Brow_Focus: 0.52, Mouth_Grit_Fire: 0.32 },
       };
     })
   );
 
-  // =========================================================================
-  // 4. Sprint_Combat: Explosive high-knee sprint, deep forward lean, strong arm pump
-  // =========================================================================
+  // 5. Crouch_Idle
   clips.push(
-    sampleClip('Sprint_Combat', 0.54, 30, rig, (u) => {
-      const w = u * Math.PI * 2;
-      const sinW = Math.sin(w);
-      const cosW = Math.cos(w);
-
-      const thL = -0.84 * sinW - 0.20;
-      const knL = Math.max(0.15, 0.88 + 0.72 * Math.sin(w - 1.15));
-      const ftL = 0.34 * Math.sin(w - 1.55) - 0.08;
-
-      const thR = 0.84 * sinW - 0.20;
-      const knR = Math.max(0.15, 0.88 + 0.72 * Math.sin(w + Math.PI - 1.15));
-      const ftR = 0.34 * Math.sin(w + Math.PI - 1.55) - 0.08;
-
-      const dropY = calcGroundedPelvisDrop(thL, knL, thR, knR);
-      const flight = Math.abs(sinW) * 0.068 - 0.01;
-
+    buildClipFromSampler('Crouch_Idle', 2.6, rig, (p) => {
+      const a = p * Math.PI * 2;
+      const breath = Math.sin(a);
       const rot: Record<string, [number, number, number]> = {
-        Pelvis: [0.20, sinW * 0.18, -cosW * 0.05],
-        Spine_01: [0.12, -sinW * 0.11, cosW * 0.03],
-        Spine_02: [0.10, -sinW * 0.11, cosW * 0.02],
-        Chest: [0.08 + Math.sin(w * 2) * 0.025, -sinW * 0.14, 0],
-        Neck: [-0.22, sinW * 0.10, 0],
-        Head: [-0.22, sinW * 0.08, 0],
-        Clavicle_L: [0, sinW * 0.10, 0.03],
-        Clavicle_R: [0, -sinW * 0.10, -0.03],
-        Hand_L: [0.08, 0, -0.12],
-        Hand_R: [0.08, 0, 0.12],
-        Thigh_L: [thL, 0, 0.01],
-        Calf_L: [knL, 0, 0],
-        Foot_L: [ftL, 0, 0],
-        Toe_L: [-Math.max(0, 0.40 * Math.sin(w - 2.1)), 0, 0],
-        Thigh_R: [thR, 0, -0.01],
-        Calf_R: [knR, 0, 0],
-        Foot_R: [ftR, 0, 0],
-        Toe_R: [-Math.max(0, 0.40 * Math.sin(w + Math.PI - 2.1)), 0, 0],
+        pelvis: [0.26, 0.14, 0],
+        spine_01: [0.10 + breath * 0.015, -0.06, 0],
+        spine_02: [0.09 + breath * 0.018, -0.06, 0],
+        spine_03: [0.06 + breath * 0.02, -0.05, 0],
+        neck_01: [-0.18, 0.04, 0],
+        head: [-0.22, 0.06 + Math.sin(a * 0.5) * 0.05, 0],
+        upperarm_l: [-0.36, 0.48, -0.96],
+        lowerarm_l: [0.35, 0.64, -0.12],
+        upperarm_r: [-0.42, -0.44, 0.94],
+        lowerarm_r: [0.38, -0.64, 0.12],
+        thigh_l: [-1.12, 0.24, 0.14],
+        calf_l: [1.62, 0, 0],
+        foot_l: [-0.50, 0, 0],
+        thigh_r: [-0.94, -0.20, -0.12],
+        calf_r: [1.56, 0, 0],
+        foot_r: [-0.62, 0, 0],
       };
-
-      // Athletic tight runner arm drive (hands driving chin-to-hip forward & back!)
-      const quat: Record<string, THREE.Quaternion> = {};
-      setArmsIK(
-        rig,
-        quat,
-        [-0.02 - sinW * 0.06, -0.18 - sinW * 0.14, 0.24 - sinW * 0.26],
-        [0.18, -0.26, -0.40 - sinW * 0.15],
-        [0.02 - sinW * 0.06, -0.18 + sinW * 0.14, 0.24 + sinW * 0.26],
-        [-0.18, -0.26, -0.40 + sinW * 0.15]
-      );
-
-      applyFingerCurl(rot, 'L', 0.88);
-      applyFingerCurl(rot, 'R', 0.88);
-
+      addFingerCurl(rot, 'l', 0.72);
+      addFingerCurl(rot, 'r', 0.72);
       return {
-        pelvisOffset: [cosW * 0.024, dropY + flight, 0],
+        pelvisOffset: [0, -0.34 + breath * 0.008, 0.02],
         rot,
-        quat,
-        morph: { Brow_Focus: 0.65, Mouth_Grit_Fire: 0.38, Nostril_Flare: 0.55 },
+        morphs: { Brow_Focus: 0.45 },
       };
     })
   );
 
-  // =========================================================================
-  // 5. Crouch_Idle: Low combat-ready crouched stance, hands up near tactical ready
-  // =========================================================================
+  // 7. Crouch_Walk
   clips.push(
-    sampleClip('Crouch_Idle', 2.8, 30, rig, (u) => {
-      const w = u * Math.PI * 2;
-      const breath = Math.sin(w);
-      const thL = -0.82;
-      const knL = 1.44;
-      const thR = -0.62;
-      const knR = 1.24;
-      const dropY = calcGroundedPelvisDrop(thL, knL, thR, knR);
-
+    buildClipFromSampler('Crouch_Walk', 1.15, rig, (p) => {
+      const a = p * Math.PI * 2;
+      const s = Math.sin(a);
+      const c = Math.cos(a);
       const rot: Record<string, [number, number, number]> = {
-        Pelvis: [0.16, -0.18, 0],
-        Spine_01: [0.14 + breath * 0.015, 0.06, 0],
-        Spine_02: [0.12 + breath * 0.018, 0.06, 0],
-        Chest: [0.06 + breath * 0.02, 0.08, 0],
-        Neck: [-0.24, 0.04, 0],
-        Head: [-0.20, 0.06, 0],
-        Hand_L: [0.05, 0, -0.1],
-        Hand_R: [0.05, 0, 0.1],
-        Thigh_L: [thL, 0.12, 0.08],
-        Calf_L: [knL, 0, 0],
-        Foot_L: [-0.62, 0, 0],
-        Toe_L: [0, 0, 0],
-        Thigh_R: [thR, -0.14, -0.08],
-        Calf_R: [knR, 0, 0],
-        Foot_R: [-0.54, 0, 0],
-        Toe_R: [-0.15, 0, 0],
+        pelvis: [0.24, -s * 0.09, s * 0.03],
+        spine_01: [0.10, s * 0.05, 0],
+        spine_02: [0.08, s * 0.05, 0],
+        spine_03: [0.06, s * 0.05, 0],
+        neck_01: [-0.18, -s * 0.04, 0],
+        head: [-0.20, -s * 0.04, 0],
+        upperarm_l: [-0.36 - s * 0.14, 0.52, -0.92],
+        lowerarm_l: [0.36, 0.68, -0.10],
+        upperarm_r: [-0.42 + s * 0.14, -0.46, 0.92],
+        lowerarm_r: [0.38, -0.68, 0.10],
+        thigh_l: [-0.98 - s * 0.36, 0.14, 0.08],
+        calf_l: [1.46 + Math.max(0, -c) * 0.34, 0, 0],
+        foot_l: [-0.48 + c * 0.16, 0, 0],
+        thigh_r: [-0.98 + s * 0.36, -0.14, -0.08],
+        calf_r: [1.46 + Math.max(0, c) * 0.34, 0, 0],
+        foot_r: [-0.48 - c * 0.16, 0, 0],
       };
-
-      const quat: Record<string, THREE.Quaternion> = {};
-      setArmsIK(
-        rig,
-        quat,
-        [-0.08, -0.22 + breath * 0.008, 0.36],
-        [0.18, -0.35, -0.15],
-        [0.10, -0.24 + breath * 0.008, 0.28],
-        [-0.18, -0.35, -0.20]
-      );
-
-      applyFingerCurl(rot, 'L', 0.68);
-      applyFingerCurl(rot, 'R', 0.72, true);
-
+      addFingerCurl(rot, 'l', 0.78);
+      addFingerCurl(rot, 'r', 0.78);
       return {
-        pelvisOffset: [0, dropY + breath * 0.006, 0.02],
+        pelvisOffset: [s * 0.015, -0.32 + Math.abs(s) * 0.025, 0.02],
         rot,
-        quat,
-        morph: { Brow_Focus: 0.45 },
       };
     })
   );
 
-  // =========================================================================
-  // 6. Crouch_Walk: Smooth stealth crouch stride keeping head level
-  // =========================================================================
+  // 7. Jump_Action
   clips.push(
-    sampleClip('Crouch_Walk', 1.05, 30, rig, (u) => {
-      const w = u * Math.PI * 2;
-      const sinW = Math.sin(w);
-      const cosW = Math.cos(w);
-
-      const thL = -0.76 - 0.34 * sinW;
-      const knL = Math.max(0.55, 1.32 + 0.34 * Math.sin(w - 0.95));
-      const ftL = -(thL + knL) * 0.85;
-
-      const thR = -0.76 + 0.34 * sinW;
-      const knR = Math.max(0.55, 1.32 + 0.34 * Math.sin(w + Math.PI - 0.95));
-      const ftR = -(thR + knR) * 0.85;
-
-      const dropY = calcGroundedPelvisDrop(thL, knL, thR, knR);
-
-      const rot: Record<string, [number, number, number]> = {
-        Pelvis: [0.18, sinW * 0.12, -cosW * 0.035],
-        Spine_01: [0.14, -sinW * 0.06, cosW * 0.02],
-        Spine_02: [0.12, -sinW * 0.06, cosW * 0.015],
-        Chest: [0.06, -sinW * 0.05, 0],
-        Neck: [-0.25, sinW * 0.03, 0],
-        Head: [-0.22, sinW * 0.02, 0],
-        Hand_L: [0.05, 0, -0.08],
-        Hand_R: [0.05, 0, 0.08],
-        Thigh_L: [thL, 0.06, 0.06],
-        Calf_L: [knL, 0, 0],
-        Foot_L: [ftL, 0, 0],
-        Toe_L: [0, 0, 0],
-        Thigh_R: [thR, -0.06, -0.06],
-        Calf_R: [knR, 0, 0],
-        Foot_R: [ftR, 0, 0],
-        Toe_R: [0, 0, 0],
-      };
-
-      const quat: Record<string, THREE.Quaternion> = {};
-      setArmsIK(
-        rig,
-        quat,
-        [-0.08, -0.22, 0.35 - sinW * 0.04],
-        [0.18, -0.35, -0.15],
-        [0.10, -0.24, 0.27 + sinW * 0.04],
-        [-0.18, -0.35, -0.20]
-      );
-
-      applyFingerCurl(rot, 'L', 0.70);
-      applyFingerCurl(rot, 'R', 0.74, true);
-
-      return {
-        pelvisOffset: [cosW * 0.02, dropY + Math.abs(sinW) * 0.014, 0.02],
-        rot,
-        quat,
-        morph: { Brow_Focus: 0.5 },
-      };
-    })
-  );
-
-  // =========================================================================
-  // 7 & 8. Strafe_Left & Strafe_Right: Combat side-step with weapon-ready hands
-  // =========================================================================
-  const buildStrafe = (dir: 1 | -1, name: 'Strafe_Left' | 'Strafe_Right') =>
-    sampleClip(name, 0.78, 30, rig, (u) => {
-      const w = u * Math.PI * 2;
-      const sinW = Math.sin(w);
-      const cosW = Math.cos(w);
-
-      const abdL = 0.08 + 0.24 * sinW * dir;
-      const abdR = -0.08 - 0.24 * sinW * dir;
-      const thL = -0.26 - Math.max(0, sinW * dir) * 0.28;
-      const knL = 0.44 + Math.max(0, sinW * dir) * 0.46;
-      const thR = -0.26 - Math.max(0, -sinW * dir) * 0.28;
-      const knR = 0.44 + Math.max(0, -sinW * dir) * 0.46;
-
-      const dropY = calcGroundedPelvisDrop(thL, knL, thR, knR);
-
-      const rot: Record<string, [number, number, number]> = {
-        Pelvis: [0.09, -0.18 * dir, -0.06 * dir + cosW * 0.03],
-        Spine_01: [0.05, 0.08 * dir, 0.03 * dir],
-        Spine_02: [0.04, 0.08 * dir, 0.02 * dir],
-        Chest: [0.03, 0.12 * dir, 0.02 * dir],
-        Neck: [-0.08, -0.05 * dir, 0],
-        Head: [-0.08, -0.05 * dir, 0],
-        Hand_L: [0.08, 0.1, -0.1],
-        Hand_R: [0.08, -0.1, 0.1],
-        Thigh_L: [thL, 0.06, abdL],
-        Calf_L: [knL, 0, 0],
-        Foot_L: [-(thL + knL) * 0.78, 0, -abdL * 0.5],
-        Toe_L: [0, 0, 0],
-        Thigh_R: [thR, -0.06, abdR],
-        Calf_R: [knR, 0, 0],
-        Foot_R: [-(thR + knR) * 0.78, 0, -abdR * 0.5],
-        Toe_R: [0, 0, 0],
-      };
-
-      const quat: Record<string, THREE.Quaternion> = {};
-      setArmsIK(
-        rig,
-        quat,
-        [-0.14, -0.14, 0.44],
-        [0.16, -0.35, 0.05],
-        [0.14, -0.15, 0.28],
-        [-0.22, -0.35, -0.12]
-      );
-
-      applyFingerCurl(rot, 'L', 0.74);
-      applyFingerCurl(rot, 'R', 0.78, true);
-
-      return {
-        pelvisOffset: [sinW * 0.035 * dir, dropY + Math.abs(sinW) * 0.02, 0],
-        rot,
-        quat,
-        morph: { Brow_Focus: 0.58 },
-      };
-    });
-
-  clips.push(buildStrafe(1, 'Strafe_Left'));
-  clips.push(buildStrafe(-1, 'Strafe_Right'));
-
-  // =========================================================================
-  // 9. Combat_Aim_Stance: Authentic 2-handed Battlegrounds / GTA-5 weapon-aiming
-  //    posture solved via exact analytical 2-bone IK!
-  //    - Left support hand cupped forward on centerline (+0.48m ahead)
-  //    - Right trigger hand tucked tight near right chest/cheek sightline (+0.26m ahead)
-  // =========================================================================
-  clips.push(
-    sampleClip('Combat_Aim_Stance', 2.4, 30, rig, (u) => {
-      const w = u * Math.PI * 2;
-      const breath = Math.sin(w);
-      const blink = Math.exp(-Math.pow((u - 0.74) / 0.022, 2));
-
-      const thL = -0.26;
-      const knL = 0.36;
-      const thR = 0.08;
-      const knR = 0.24;
-      const dropY = calcGroundedPelvisDrop(thL, knL, thR, knR);
-
-      const rot: Record<string, [number, number, number]> = {
-        Pelvis: [0.08, -0.30, 0.02],
-        Spine_01: [0.06 + breath * 0.008, 0.09, 0],
-        Spine_02: [0.05 + breath * 0.01, 0.09, 0],
-        Chest: [0.04 + breath * 0.012, 0.12, 0],
-        Neck: [-0.07, 0.04, -0.06],
-        Head: [-0.05, 0.04, -0.09],
-        Eye_L: [0.02, 0.02, 0],
-        Eye_R: [0.02, 0.02, 0],
-        Clavicle_L: [0, -0.14, 0.02],
-        Clavicle_R: [0, 0.08, -0.02],
-        Hand_L: [-0.20, 0.15, -0.15],
-        Hand_R: [0.15, -0.10, 0.12],
-        Thigh_L: [thL, 0.12, 0.09],
-        Calf_L: [knL, 0, 0],
-        Foot_L: [-0.10, 0, -0.06],
-        Toe_L: [0, 0, 0],
-        Thigh_R: [thR, -0.16, -0.08],
-        Calf_R: [knR, 0, 0],
-        Foot_R: [-0.26, 0, 0.06],
-        Toe_R: [-0.06, 0, 0],
-      };
-
-      const quat: Record<string, THREE.Quaternion> = {};
-      // Shoulder L is at (+0.198, 1.482, 0.002), Shoulder R is at (-0.198, 1.482, 0.002)
-      // Left support hand reaches forward & inward to centerline (x ≈ -0.02 -> rel -0.21, y ≈ -0.09, z ≈ +0.46)
-      // Right trigger hand reaches inward & forward near right pec/sightline (x ≈ -0.06 -> rel +0.13, y ≈ -0.11, z ≈ +0.27)
-      setArmsIK(
-        rig,
-        quat,
-        [-0.20, -0.09 + breath * 0.006, 0.45],
-        [0.06, -0.40, 0.15],
-        [0.13, -0.11 + breath * 0.005, 0.27],
-        [-0.28, -0.35, -0.08]
-      );
-
-      applyFingerCurl(rot, 'L', 0.66);
-      applyFingerCurl(rot, 'R', 0.86, true);
-
-      return {
-        pelvisOffset: [0, dropY + breath * 0.003, 0],
-        rot,
-        quat,
-        morph: {
-          Blink_L: blink,
-          Blink_R: blink,
-          Brow_Focus: 0.78,
-          Mouth_Smirk: 0.08,
-          Nostril_Flare: 0.16,
-        },
-      };
-    })
-  );
-
-  // =========================================================================
-  // 10. Combat_Fire_Burst: Authentic 3-round weapon recoil traveling through
-  //     hands -> elbows -> shoulders -> chest/head + firing grit morph!
-  // =========================================================================
-  clips.push(
-    sampleClip('Combat_Fire_Burst', 0.84, 30, rig, (u) => {
-      const shotPulse = (uVal: number, center: number) => {
-        const d = uVal - center;
-        if (d < 0) return 0;
-        return Math.sin(Math.min(1, d / 0.035) * Math.PI * 0.5) * Math.exp(-d * 14.5);
-      };
-
-      const kickHand = shotPulse(u, 0.06) + shotPulse(u, 0.32) + shotPulse(u, 0.58);
-      const kickArm = shotPulse(u, 0.085) + shotPulse(u, 0.345) + shotPulse(u, 0.605);
-      const kickTorso = shotPulse(u, 0.11) + shotPulse(u, 0.37) + shotPulse(u, 0.63);
-
-      const thL = -0.28;
-      const knL = 0.40;
-      const thR = 0.06;
-      const knR = 0.28;
-      const dropY = calcGroundedPelvisDrop(thL, knL, thR, knR);
-
-      const rot: Record<string, [number, number, number]> = {
-        Pelvis: [0.10 - kickTorso * 0.03, -0.30, 0.02],
-        Spine_01: [0.07 - kickTorso * 0.05, 0.09, 0],
-        Spine_02: [0.06 - kickTorso * 0.065, 0.09, 0],
-        Chest: [0.05 - kickTorso * 0.085, 0.12 - kickTorso * 0.04, 0],
-        Neck: [-0.07 + kickTorso * 0.04, 0.04, -0.06],
-        Head: [-0.05 - kickTorso * 0.065, 0.04, -0.09],
-        Clavicle_L: [0, -0.14 + kickArm * 0.05, 0.02 + kickArm * 0.04],
-        Clavicle_R: [0, 0.08 - kickArm * 0.06, -0.02 - kickArm * 0.05],
-        Hand_L: [-0.20 - kickHand * 0.22, 0.15, -0.15],
-        Hand_R: [0.15 - kickHand * 0.25, -0.10, 0.12],
-        Thigh_L: [thL, 0.12, 0.09],
-        Calf_L: [knL, 0, 0],
-        Foot_L: [-0.12, 0, -0.06],
-        Toe_L: [0, 0, 0],
-        Thigh_R: [thR, -0.16, -0.08],
-        Calf_R: [knR, 0, 0],
-        Foot_R: [-0.28, 0, 0.06],
-        Toe_R: [-0.06, 0, 0],
-      };
-
-      // Sharp muzzle climb & rearward punch on both hands during each burst impulse!
-      const quat: Record<string, THREE.Quaternion> = {};
-      setArmsIK(
-        rig,
-        quat,
-        [-0.20, -0.09 + kickHand * 0.065, 0.45 - kickHand * 0.055],
-        [0.06, -0.40 + kickArm * 0.06, 0.15],
-        [0.13, -0.11 + kickHand * 0.055, 0.27 - kickHand * 0.05],
-        [-0.28, -0.35 + kickArm * 0.06, -0.08]
-      );
-
-      applyFingerCurl(rot, 'L', 0.72);
-      applyFingerCurl(rot, 'R', 0.90, true);
-      rot.Index_02_R = [0, 0, 0.72 + kickHand * 0.35];
-
-      return {
-        pelvisOffset: [0, dropY - kickTorso * 0.008, -kickTorso * 0.022],
-        rot,
-        quat,
-        morph: {
-          Blink_L: Math.min(0.45, kickHand * 0.45),
-          Blink_R: Math.min(0.45, kickHand * 0.45),
-          Brow_Focus: 0.92,
-          Mouth_Grit_Fire: Math.min(1.0, 0.58 + kickTorso * 0.42),
-          Nostril_Flare: Math.min(1.0, 0.45 + kickTorso * 0.45),
-        },
-      };
-    })
-  );
-
-  // =========================================================================
-  // 11. Jump_Action: Deep anticipation dip -> launch -> mid-air tuck -> landing
-  // =========================================================================
-  clips.push(
-    sampleClip('Jump_Action', 1.15, 30, rig, (u) => {
-      let pelY = 0;
-      let lean = 0.04;
-      let thL = -0.05;
-      let knL = 0.08;
-      let thR = -0.04;
-      let knR = 0.07;
-      let handY = -0.48;
-      let handZ = 0.08;
-
-      if (u < 0.22) {
-        const k = Math.sin((u / 0.22) * Math.PI * 0.5);
-        thL = -0.68 * k;
-        knL = 1.24 * k;
-        thR = -0.64 * k;
-        knR = 1.18 * k;
-        pelY = calcGroundedPelvisDrop(thL, knL, thR, knR);
-        lean = 0.28 * k;
-        handY = -0.44 + k * 0.08;
-        handZ = 0.08 - k * 0.34; // Arms swing back for explosive spring
-      } else if (u < 0.70) {
-        const airU = (u - 0.22) / 0.48;
-        const arc = Math.sin(airU * Math.PI);
-        pelY = arc * 0.52;
-        lean = 0.14 * (1 - arc) + 0.12;
-        thL = -0.92 * arc - 0.12;
-        knL = 1.38 * arc + 0.18;
-        thR = -0.58 * arc - 0.08;
-        knR = 0.98 * arc + 0.16;
-        handY = -0.44 + arc * 0.55; // Arms drive upward & forward
-        handZ = 0.08 + arc * 0.32;
+    buildClipFromSampler('Jump_Action', 1.0, rig, (p) => {
+      let yOff = 0;
+      let kneeBend = 0.12;
+      let hipFlex = -0.1;
+      let torsoLean = 0.08;
+      if (p < 0.22) {
+        const t = Math.sin((p / 0.22) * Math.PI * 0.5);
+        yOff = -0.18 * t;
+        kneeBend = 0.12 + 0.92 * t;
+        hipFlex = -0.1 - 0.65 * t;
+        torsoLean = 0.08 + 0.22 * t;
+      } else if (p < 0.72) {
+        const t = (p - 0.22) / 0.5;
+        const arc = Math.sin(t * Math.PI);
+        yOff = -0.06 + arc * 0.36;
+        kneeBend = 0.65 * arc + 0.25;
+        hipFlex = -0.58 * arc - 0.18;
+        torsoLean = 0.14 - 0.08 * arc;
       } else {
-        const recU = (u - 0.70) / 0.30;
-        const impact = Math.sin(recU * Math.PI);
-        thL = -0.74 * impact - 0.05;
-        knL = 1.34 * impact + 0.08;
-        thR = -0.70 * impact - 0.04;
-        knR = 1.28 * impact + 0.07;
-        pelY = calcGroundedPelvisDrop(thL, knL, thR, knR);
-        lean = 0.30 * impact + 0.04;
-        handY = -0.46 + impact * 0.14;
-        handZ = 0.08 + impact * 0.22;
+        const t = (p - 0.72) / 0.28;
+        const absorb = Math.sin(t * Math.PI);
+        yOff = -0.22 * absorb;
+        kneeBend = 0.14 + 1.02 * absorb;
+        hipFlex = -0.12 - 0.68 * absorb;
+        torsoLean = 0.08 + 0.24 * absorb;
       }
-
       const rot: Record<string, [number, number, number]> = {
-        Pelvis: [lean * 0.45, 0, 0],
-        Spine_01: [lean * 0.35, 0, 0],
-        Spine_02: [lean * 0.30, 0, 0],
-        Chest: [lean * 0.25, 0, 0],
-        Neck: [-lean * 0.45, 0, 0],
-        Head: [-lean * 0.40, 0, 0],
-        Hand_L: [0.05, 0, -0.08],
-        Hand_R: [0.05, 0, 0.08],
-        Thigh_L: [thL, 0.04, 0.04],
-        Calf_L: [knL, 0, 0],
-        Foot_L: [u >= 0.22 && u < 0.70 ? 0.35 : -(thL + knL) * 0.85, 0, 0],
-        Toe_L: [0, 0, 0],
-        Thigh_R: [thR, -0.04, -0.04],
-        Calf_R: [knR, 0, 0],
-        Foot_R: [u >= 0.22 && u < 0.70 ? 0.30 : -(thR + knR) * 0.85, 0, 0],
-        Toe_R: [0, 0, 0],
+        pelvis: [torsoLean * 0.6, 0, 0],
+        spine_01: [torsoLean * 0.35, 0, 0],
+        spine_02: [torsoLean * 0.3, 0, 0],
+        spine_03: [torsoLean * 0.25, 0, 0],
+        neck_01: [-torsoLean * 0.5, 0, 0],
+        head: [-torsoLean * 0.45, 0, 0],
+        upperarm_l: [-0.28, 0.32, -0.82],
+        lowerarm_l: [0.35, 0.54, -0.15],
+        upperarm_r: [-0.28, -0.32, 0.82],
+        lowerarm_r: [0.35, -0.54, 0.15],
+        thigh_l: [hipFlex, 0.08, 0.05],
+        calf_l: [kneeBend, 0, 0],
+        foot_l: [-kneeBend * 0.35, 0, 0],
+        thigh_r: [hipFlex * 0.9, -0.08, -0.05],
+        calf_r: [kneeBend * 0.94, 0, 0],
+        foot_r: [-kneeBend * 0.32, 0, 0],
       };
+      addFingerCurl(rot, 'l', 0.8);
+      addFingerCurl(rot, 'r', 0.8);
+      return { pelvisOffset: [0, yOff, 0], rot };
+    })
+  );
 
-      const quat: Record<string, THREE.Quaternion> = {};
-      setArmsIK(
-        rig,
-        quat,
-        [0.12, handY, handZ],
-        [0.25, -0.25, -0.30],
-        [-0.12, handY, handZ],
-        [-0.25, -0.25, -0.30]
-      );
-
-      applyFingerCurl(rot, 'L', 0.62);
-      applyFingerCurl(rot, 'R', 0.62);
-
+  // 9. Strafe_Left (clean level upper-body posture, crisp lateral step cadence)
+  clips.push(
+    buildClipFromSampler('Strafe_Left', 0.85, rig, (p) => {
+      const a = p * Math.PI * 2;
+      const s = Math.sin(a);
+      const c = Math.cos(a);
+      const rot: Record<string, [number, number, number]> = {
+        pelvis: [0.07, -0.14 + s * 0.06, -0.03 + s * 0.03],
+        spine_01: [0.02, 0.06, 0.02],
+        spine_02: [0.01, 0.05, 0.01],
+        spine_03: [0.01, 0.06, 0.0],
+        neck_01: [-0.03, -0.04, 0],
+        head: [-0.03, -0.03, 0],
+        upperarm_l: [-0.52, 0.68, -0.78],
+        lowerarm_l: [0.42, 0.72, -0.16],
+        upperarm_r: [-0.56, -0.58, 0.76],
+        lowerarm_r: [0.48, -0.76, 0.16],
+        thigh_l: [-0.26 - Math.max(0, s) * 0.24, 0.10, 0.14 + s * 0.26],
+        calf_l: [0.46 + Math.max(0, -c) * 0.38, 0, 0],
+        foot_l: [-0.20, 0, -s * 0.14],
+        thigh_r: [-0.26 - Math.max(0, -s) * 0.24, -0.10, -0.10 + s * 0.24],
+        calf_r: [0.46 + Math.max(0, c) * 0.38, 0, 0],
+        foot_r: [-0.20, 0, -s * 0.14],
+      };
+      addFingerCurl(rot, 'l', 0.85);
+      addFingerCurl(rot, 'r', 0.85);
       return {
-        pelvisOffset: [0, pelY, 0],
+        pelvisOffset: [s * 0.024, -0.075 + Math.abs(s) * 0.022, 0],
         rot,
-        quat,
-        morph: {
-          Brow_Focus: 0.6,
-          Mouth_Grit_Fire: u > 0.18 && u < 0.78 ? 0.45 : 0.08,
-          Nostril_Flare: 0.4,
+        morphs: { Brow_Focus: 0.46 },
+      };
+    })
+  );
+
+  // 9. Strafe_Right (clean level upper-body posture, crisp lateral step cadence)
+  clips.push(
+    buildClipFromSampler('Strafe_Right', 0.85, rig, (p) => {
+      const a = p * Math.PI * 2;
+      const s = Math.sin(a);
+      const c = Math.cos(a);
+      const rot: Record<string, [number, number, number]> = {
+        pelvis: [0.07, 0.14 - s * 0.06, 0.03 - s * 0.03],
+        spine_01: [0.02, -0.06, -0.02],
+        spine_02: [0.01, -0.05, -0.01],
+        spine_03: [0.01, -0.06, 0.0],
+        neck_01: [-0.03, 0.04, 0],
+        head: [-0.03, 0.03, 0],
+        upperarm_l: [-0.52, 0.68, -0.78],
+        lowerarm_l: [0.42, 0.72, -0.16],
+        upperarm_r: [-0.56, -0.58, 0.76],
+        lowerarm_r: [0.48, -0.76, 0.16],
+        thigh_l: [-0.26 - Math.max(0, -s) * 0.24, 0.10, 0.10 - s * 0.24],
+        calf_l: [0.46 + Math.max(0, c) * 0.38, 0, 0],
+        foot_l: [-0.20, 0, s * 0.14],
+        thigh_r: [-0.26 - Math.max(0, s) * 0.24, -0.10, -0.14 - s * 0.26],
+        calf_r: [0.46 + Math.max(0, -c) * 0.38, 0, 0],
+        foot_r: [-0.20, 0, s * 0.14],
+      };
+      addFingerCurl(rot, 'l', 0.85);
+      addFingerCurl(rot, 'r', 0.85);
+      return {
+        pelvisOffset: [-s * 0.024, -0.075 + Math.abs(s) * 0.022, 0],
+        rot,
+        morphs: { Brow_Focus: 0.46 },
+      };
+    })
+  );
+
+  // 10. Combat_Aim_Stance (upright neck, disciplined shoulder cheek-weld, steady rifle sight line)
+  clips.push(
+    buildClipFromSampler('Combat_Aim_Stance', 2.4, rig, (p) => {
+      const a = p * Math.PI * 2;
+      const breath = Math.sin(a);
+      const rot: Record<string, [number, number, number]> = {
+        pelvis: [0.06, -0.22, 0.01],
+        spine_01: [0.03, 0.08, 0],
+        spine_02: [0.03 + breath * 0.008, 0.09, 0],
+        spine_03: [0.02 + breath * 0.010, 0.10, -0.02],
+        // Upright forward-facing neck & head (never twisted backward!)
+        neck_01: [-0.02, -0.05, 0.03],
+        head: [-0.03, -0.04, 0.04],
+        clavicle_r: [0.04, -0.10, 0.02],
+        upperarm_r: [-0.72, -0.52, 0.56],
+        lowerarm_r: [0.28, -1.04, 0.18],
+        hand_r: [-0.08, 0.14, 0.08],
+        clavicle_l: [0.06, 0.14, -0.02],
+        upperarm_l: [-0.74, 0.88, -0.52],
+        lowerarm_l: [0.24, 0.68, -0.14],
+        hand_l: [0.06, -0.12, -0.08],
+        thigh_l: [-0.26, 0.16, 0.08],
+        calf_l: [0.40, 0, 0],
+        foot_l: [-0.14, 0.08, 0],
+        thigh_r: [0.14, -0.16, -0.08],
+        calf_r: [0.24, 0, 0],
+        foot_r: [-0.20, -0.14, 0],
+      };
+      addFingerCurl(rot, 'l', 0.88);
+      addFingerCurl(rot, 'r', 0.90);
+      rot['index_01_r'] = [0, 0, 0.14];
+      rot['index_02_r'] = [0, 0, 0.32];
+      rot['index_03_r'] = [0, 0, 0.28];
+      return {
+        pelvisOffset: [0, -0.055 + breath * 0.004, 0],
+        rot,
+        morphs: { Brow_Focus: 0.72 },
+      };
+    })
+  );
+
+  // 11. Combat_Fire_Burst (3-round shoulder recoil pulse + amplified Mouth_Grit_Fire morph!)
+  clips.push(
+    buildClipFromSampler('Combat_Fire_Burst', 0.65, rig, (p) => {
+      const burstPulse =
+        Math.pow(Math.max(0, Math.sin(p * Math.PI * 3)), 3) * (p < 0.78 ? 1.0 : 0.2);
+      const kick = burstPulse * 0.085;
+      const rot: Record<string, [number, number, number]> = {
+        pelvis: [0.07 - kick * 0.2, -0.22, 0.01],
+        spine_01: [0.03 - kick * 0.4, 0.08, 0],
+        spine_02: [0.02 - kick * 0.65, 0.09, 0],
+        spine_03: [0.02 - kick * 0.85, 0.10, -0.02],
+        neck_01: [-0.02 + kick * 0.45, -0.05, 0.03],
+        head: [-0.03 + kick * 0.40, -0.04, 0.04],
+        clavicle_r: [0.04 - kick * 0.8, -0.10, 0.02],
+        upperarm_r: [-0.74 - kick * 1.1, -0.52, 0.56],
+        lowerarm_r: [0.28, -1.04, 0.18],
+        hand_r: [-0.08 - kick * 0.5, 0.14, 0.08],
+        clavicle_l: [0.06 - kick * 0.5, 0.14, -0.02],
+        upperarm_l: [-0.76 - kick * 0.9, 0.88, -0.52],
+        lowerarm_l: [0.24, 0.68, -0.14],
+        hand_l: [0.06, -0.12, -0.08],
+        thigh_l: [-0.28, 0.16, 0.08],
+        calf_l: [0.42, 0, 0],
+        foot_l: [-0.14, 0.08, 0],
+        thigh_r: [0.15, -0.16, -0.08],
+        calf_r: [0.25, 0, 0],
+        foot_r: [-0.20, -0.14, 0],
+      };
+      addFingerCurl(rot, 'l', 0.92);
+      addFingerCurl(rot, 'r', 0.94);
+      rot['index_01_r'] = [0, 0, 0.30 + burstPulse * 0.25];
+      rot['index_02_r'] = [0, 0, 0.55 + burstPulse * 0.30];
+      rot['index_03_r'] = [0, 0, 0.44 + burstPulse * 0.24];
+      return {
+        pelvisOffset: [0, -0.062, -kick * 0.14],
+        rot,
+        morphs: {
+          Brow_Focus: 0.85,
+          Mouth_Grit_Fire: 0.55 + burstPulse * 0.45,
+          Nostril_Flare: 0.32 + burstPulse * 0.35,
         },
       };
     })

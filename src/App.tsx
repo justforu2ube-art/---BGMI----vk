@@ -1,5 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
-import { Crosshair, Download, Eye, Flashlight, HelpCircle, RotateCcw, Volume2, VolumeX } from 'lucide-react';
+import {
+  Crosshair,
+  Download,
+  Eye,
+  Flashlight,
+  HelpCircle,
+  Menu,
+  RotateCcw,
+  SlidersHorizontal,
+  Volume2,
+  VolumeX,
+  X,
+} from 'lucide-react';
 import {
   CAMERA_PRESETS,
   CameraPresetKey,
@@ -16,6 +28,7 @@ import {
 import { ANIMATION_NAMES, AnimationName } from './character/animations';
 import { FACIAL_MORPH_NAMES, FacialMorphName } from './character/headSculpt';
 import { BuiltCharacter } from './character/characterBuilder';
+import { CharacterLodLevel } from './types/studioTypes';
 import { tacticalAudio } from './studio/audio';
 import { weaponAudio } from './weapons/weaponAudio';
 import {
@@ -110,7 +123,12 @@ export default function App() {
   const [isExporting, setIsExporting] = useState(false);
   const [isExportingWeapon, setIsExportingWeapon] = useState(false);
   const [isAiming, setIsAiming] = useState(false);
+  const [awmScopeActive, setAwmScopeActive] = useState(false);
   const [weaponHud, setWeaponHud] = useState<WeaponHUDState>(INITIAL_WEAPON_HUD);
+
+  // Responsive <=768px slide-over drawers
+  const [leftDrawerOpen, setLeftDrawerOpen] = useState(false);
+  const [rightDrawerOpen, setRightDrawerOpen] = useState(false);
 
   // Welcome controls guide modal state (persisted via localStorage; skippable via ?autostart=1)
   const [guideOpen, setGuideOpen] = useState<boolean>(
@@ -125,6 +143,7 @@ export default function App() {
   const [showSkeleton, setShowSkeleton] = useState(false);
   const [wireframe, setWireframe] = useState(false);
   const [autoRotate, setAutoRotate] = useState(false);
+  const [lodLevel, setLodLevel] = useState<CharacterLodLevel>('LOD0');
   const [muted, setMuted] = useState(false);
 
   // Facial Morph Sliders
@@ -152,6 +171,7 @@ export default function App() {
         });
       },
       onAimStateChange: (aim) => setIsAiming(aim),
+      onAwmScopeChange: (active) => setAwmScopeActive(active),
       onWeaponStateChange: (ws) => setWeaponHud(ws),
     });
     engineRef.current = engine;
@@ -174,6 +194,7 @@ export default function App() {
 
   const handleSectionSelect = (section: StudioSection) => {
     setActiveSection(section);
+    setLeftDrawerOpen(false);
     if (section === 'combat') {
       if (mode !== 'combat') {
         setMode('combat');
@@ -290,6 +311,11 @@ export default function App() {
   const handleSpeedChange = (val: number) => {
     setPlaybackSpeed(val);
     engineRef.current?.setDisplayOptions({ playbackSpeed: val });
+  };
+
+  const handleLodChange = (next: CharacterLodLevel) => {
+    setLodLevel(next);
+    engineRef.current?.setDisplayOptions({ lod: next });
   };
 
   const handleToggleMute = () => {
@@ -420,22 +446,52 @@ export default function App() {
 
   return (
     <div
-      className="w-screen h-screen overflow-hidden bg-[#f8f7f4] text-[#1a1a1a] grid grid-cols-1 lg:grid-cols-[290px_1fr_300px] xl:grid-cols-[310px_1fr_320px] grid-rows-[auto_1fr_auto]"
+      className="studio-shell bg-[#f8f7f4] text-[#1a1a1a]"
       data-mode={mode}
       data-anim={activeAnim}
       data-lighting={activeLighting}
       data-weapon={weaponHud.equipped}
       data-turntable={weaponHud.gunTurntable ? '1' : '0'}
+      data-awm-scope={awmScopeActive ? '1' : '0'}
+      data-lod={lodLevel}
     >
+      {/* Mobile Slide-Over Backdrop */}
+      {!uiHidden && (leftDrawerOpen || rightDrawerOpen) && (
+        <button
+          type="button"
+          aria-label="Close studio drawers"
+          onClick={() => {
+            setLeftDrawerOpen(false);
+            setRightDrawerOpen(false);
+          }}
+          className="mobile-drawer-backdrop open fixed inset-0 z-40 bg-black/40 cursor-pointer"
+        />
+      )}
+
       {/* Left Navigation Sidebar */}
       {!uiHidden && (
-        <aside className="hidden lg:flex row-start-1 row-end-4 col-start-1 col-end-2 bg-white border-r border-[#1a1a1a]/[0.08] px-8 py-10 flex-col justify-between">
+        <aside
+          aria-label="Studio Sidebar"
+          className={`studio-shell-sidebar bg-white border-r border-[#1a1a1a]/[0.08] px-5 xl:px-6 py-6 xl:py-8 ${
+            leftDrawerOpen ? 'drawer-open' : ''
+          }`}
+        >
           <div>
-            <h1 className="font-editorial italic font-semibold text-[1.9rem] leading-none tracking-[-0.01em] text-[#1a1a1a] mb-14">
-              Vanguard.
-            </h1>
+            <div className="flex items-center justify-between gap-2 mb-10">
+              <h1 className="font-editorial italic font-semibold text-[1.75rem] xl:text-[1.9rem] leading-none tracking-[-0.01em] text-[#1a1a1a]">
+                Vanguard.
+              </h1>
+              <button
+                type="button"
+                aria-label="Close navigation menu"
+                onClick={() => setLeftDrawerOpen(false)}
+                className="mobile-drawer-btn w-7 h-7 rounded-md border border-[#1a1a1a]/15 items-center justify-center text-[#1a1a1a] cursor-pointer"
+              >
+                <X className="w-4 h-4" aria-hidden="true" />
+              </button>
+            </div>
 
-            <nav aria-label="Studio Navigation" className="flex flex-col gap-6">
+            <nav aria-label="Studio Navigation" className="flex flex-col gap-5">
               {NAV_ITEMS.map((item) => {
                 const isActive = activeSection === item.id;
                 return (
@@ -444,7 +500,7 @@ export default function App() {
                     type="button"
                     aria-current={isActive ? 'page' : undefined}
                     onClick={() => handleSectionSelect(item.id)}
-                    className={`group flex items-center gap-4 text-left uppercase font-mono-tabular text-[0.75rem] tracking-[0.1em] transition-opacity duration-150 cursor-pointer whitespace-nowrap ${
+                    className={`group flex items-center gap-3.5 text-left uppercase font-mono-tabular text-[0.72rem] tracking-[0.09em] transition-opacity duration-150 cursor-pointer whitespace-nowrap ${
                       isActive
                         ? 'opacity-100 font-semibold text-[#1a1a1a]'
                         : 'opacity-45 hover:opacity-85 text-[#1a1a1a]'
@@ -458,34 +514,47 @@ export default function App() {
                           : 'bg-transparent border-[#1a1a1a] group-hover:border-[#1a1a1a]'
                       }`}
                     />
-                    {item.label}
+                    <span className="truncate">{item.label}</span>
                   </button>
                 );
               })}
             </nav>
           </div>
 
-          <div className="font-mono-tabular text-[0.68rem] leading-[1.6] tracking-[0.04em] text-[#1a1a1a]/45 uppercase">
+          <div className="mt-8 font-mono-tabular text-[0.65rem] leading-[1.6] tracking-[0.04em] text-[#1a1a1a]/45 uppercase">
             <div>VERSION 1.87 STUDIO</div>
-            <div>VANGUARD SYSTEMS</div>
+            <div>UE5 IK_MANNEQUIN</div>
           </div>
         </aside>
       )}
 
       {/* Top Architectural Header */}
       {!uiHidden && (
-        <header className="col-start-1 lg:col-start-2 col-end-2 lg:col-end-4 row-start-1 row-end-2 px-6 lg:px-10 py-5 lg:py-7 flex items-center justify-between gap-6 border-b border-[#1a1a1a]/[0.08] bg-[#f8f7f4]">
-          <div className="flex items-center gap-4 min-w-0">
-            <span className="lg:hidden font-editorial italic font-semibold text-2xl leading-none text-[#1a1a1a] shrink-0">
+        <header className="studio-shell-header px-4 md:px-6 xl:px-8 py-3.5 md:py-5 flex items-center justify-between gap-3 border-b border-[#1a1a1a]/[0.08] bg-[#f8f7f4]">
+          <div className="flex items-center gap-2.5 md:gap-4 min-w-0">
+            <button
+              type="button"
+              aria-label="Toggle studio menu"
+              aria-expanded={leftDrawerOpen}
+              data-testid="mobile-menu-btn"
+              onClick={() => {
+                setRightDrawerOpen(false);
+                setLeftDrawerOpen((v) => !v);
+              }}
+              className="mobile-drawer-btn w-8 h-8 rounded-md border border-[#1a1a1a]/[0.16] bg-white items-center justify-center text-[#1a1a1a] cursor-pointer shrink-0"
+            >
+              <Menu className="w-4 h-4" aria-hidden="true" />
+            </button>
+            <span className="mobile-drawer-btn font-editorial italic font-semibold text-xl leading-none text-[#1a1a1a] shrink-0">
               Vanguard.
             </span>
-            <span className="font-mono-tabular text-[0.65rem] tracking-[0.08em] bg-[#1a1a1a] text-white px-3 py-1 rounded-full whitespace-nowrap shrink-0">
+            <span className="font-mono-tabular text-[0.62rem] md:text-[0.65rem] tracking-[0.08em] bg-[#1a1a1a] text-white px-2.5 md:px-3 py-1 rounded-full whitespace-nowrap shrink-0 truncate max-w-[46vw]">
               {mode === 'combat' ? 'COMBAT_CONTROLLER_ACTIVE' : 'LIVE_VIEWPORT_ENABLED'}
             </span>
           </div>
 
-          <div className="flex items-center gap-3.5 sm:gap-4 shrink-0">
-            <span className="hidden sm:inline font-mono-tabular text-[0.75rem] tracking-[0.05em] text-[#1a1a1a] whitespace-nowrap">
+          <div className="flex items-center gap-2.5 md:gap-3.5 shrink-0">
+            <span className="hidden md:inline font-mono-tabular text-[0.72rem] tracking-[0.05em] text-[#1a1a1a] whitespace-nowrap">
               OPERATOR_ALPHA_GEN3
             </span>
             <button
@@ -500,11 +569,16 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={handleExportGLB}
-              disabled={isExporting}
-              className="lg:hidden bg-[#ff4d00] hover:bg-[#e54500] disabled:opacity-60 text-white text-xs font-semibold px-3.5 py-2 rounded-md cursor-pointer whitespace-nowrap"
+              aria-label="Toggle studio inspector"
+              aria-expanded={rightDrawerOpen}
+              data-testid="mobile-inspector-btn"
+              onClick={() => {
+                setLeftDrawerOpen(false);
+                setRightDrawerOpen((v) => !v);
+              }}
+              className="mobile-drawer-btn w-8 h-8 rounded-md border border-[#1a1a1a]/[0.16] bg-white items-center justify-center text-[#1a1a1a] cursor-pointer shrink-0"
             >
-              {isExporting ? 'Exporting...' : 'Export .GLB'}
+              <SlidersHorizontal className="w-4 h-4" aria-hidden="true" />
             </button>
           </div>
         </header>
@@ -515,7 +589,7 @@ export default function App() {
         className={
           uiHidden
             ? 'fixed inset-0 z-30 studio-viewport-grid overflow-hidden'
-            : 'col-start-1 lg:col-start-2 col-end-2 lg:col-end-3 row-start-2 row-end-3 relative m-3 lg:m-6 rounded-2xl border border-[#1a1a1a]/[0.08] overflow-hidden studio-viewport-grid min-h-0'
+            : 'studio-shell-main relative m-2 md:m-4 xl:m-5 rounded-2xl border border-[#1a1a1a]/[0.08] overflow-hidden studio-viewport-grid'
         }
       >
         {/* Dedicated Isolated WebGL Mount */}
@@ -525,27 +599,31 @@ export default function App() {
           className="w-full h-full"
         />
 
-        {/* Dynamic Tactical Crosshair & AWM Mildot Sniper Scope Overlay */}
+        {/* Dynamic Tactical Crosshair & Masked AWM .338 Mildot Sniper Scope Overlay */}
         {mode === 'combat' && !weaponHud.gunTurntable && (
-          isAiming && weaponHud.equipped === 'awm' ? (
+          weaponHud.equipped === 'awm' && (awmScopeActive || isAiming) ? (
             <div
               aria-hidden="true"
-              className="absolute inset-0 z-10 pointer-events-none flex items-center justify-center"
+              data-testid="awm-scope-overlay"
+              className="awm-scope-mask absolute inset-0 z-20 pointer-events-none flex items-center justify-center"
             >
-              <svg viewBox="0 0 400 400" className="w-[340px] h-[340px] max-w-[80%] max-h-[80%]">
-                <circle cx="200" cy="200" r="176" fill="none" stroke="rgba(12,18,22,0.88)" strokeWidth="18" />
-                <circle cx="200" cy="200" r="167" fill="none" stroke="rgba(220,255,230,0.45)" strokeWidth="1.2" />
-                <line x1="36" y1="200" x2="188" y2="200" stroke="rgba(18,24,20,0.9)" strokeWidth="1.2" />
-                <line x1="212" y1="200" x2="364" y2="200" stroke="rgba(18,24,20,0.9)" strokeWidth="1.2" />
-                <line x1="200" y1="36" x2="200" y2="188" stroke="rgba(18,24,20,0.9)" strokeWidth="1.2" />
-                <line x1="200" y1="212" x2="200" y2="364" stroke="rgba(18,24,20,0.9)" strokeWidth="1.2" />
-                {[120, 144, 168, 232, 256, 280].map((p) => (
+              <svg viewBox="0 0 400 400" className="w-[70vh] h-[70vh] max-w-[92%] max-h-[92%]">
+                <circle cx="200" cy="200" r="192" fill="none" stroke="rgba(4,6,8,0.96)" strokeWidth="10" />
+                <circle cx="200" cy="200" r="186" fill="none" stroke="rgba(190,245,215,0.42)" strokeWidth="1.2" />
+                <line x1="14" y1="200" x2="188" y2="200" stroke="rgba(14,20,18,0.94)" strokeWidth="1.35" />
+                <line x1="212" y1="200" x2="386" y2="200" stroke="rgba(14,20,18,0.94)" strokeWidth="1.35" />
+                <line x1="200" y1="14" x2="200" y2="188" stroke="rgba(14,20,18,0.94)" strokeWidth="1.35" />
+                <line x1="200" y1="212" x2="200" y2="386" stroke="rgba(14,20,18,0.94)" strokeWidth="1.35" />
+                <line x1="14" y1="200" x2="96" y2="200" stroke="#06080b" strokeWidth="3.6" />
+                <line x1="304" y1="200" x2="386" y2="200" stroke="#06080b" strokeWidth="3.6" />
+                <line x1="200" y1="304" x2="200" y2="386" stroke="#06080b" strokeWidth="3.6" />
+                {[116, 138, 160, 180, 220, 240, 262, 284].map((p) => (
                   <g key={p}>
-                    <circle cx={p} cy="200" r="2.2" fill="#18201c" />
-                    <circle cx="200" cy={p} r="2.2" fill="#18201c" />
+                    <circle cx={p} cy="200" r="2.2" fill="#0d1411" />
+                    <circle cx="200" cy={p} r="2.2" fill="#0d1411" />
                   </g>
                 ))}
-                <circle cx="200" cy="200" r="2.4" fill="#ff3b20" />
+                <circle cx="200" cy="200" r="2.5" fill="#ff3b20" />
               </svg>
             </div>
           ) : (
@@ -669,38 +747,59 @@ export default function App() {
         )}
       </main>
 
-      {/* Right Inspector Panel */}
+      {/* Right Inspector Column (Scrollable body above sticky .export-footer) */}
       {!uiHidden && (
-        <section
+        <aside
           aria-label="Character Studio Inspector"
-          className="hidden lg:flex col-start-3 col-end-4 row-start-2 row-end-3 px-8 py-9 border-l border-[#1a1a1a]/[0.08] bg-[#f8f7f4] flex-col gap-9 overflow-y-auto min-h-0"
+          className={`studio-shell-inspector-col border-l border-[#1a1a1a]/[0.08] bg-[#f8f7f4] ${
+            rightDrawerOpen ? 'drawer-open' : ''
+          }`}
         >
-          {/* Section: Turntable Inspect (Default Variation 6 Composition) */}
-          {activeSection === 'inspect' && (
-            <>
-              {renderLightingControls()}
+          <div className="mobile-drawer-btn items-center justify-between px-5 py-3 border-b border-[#1a1a1a]/[0.08] bg-white">
+            <span className="font-mono-tabular text-[0.7rem] uppercase tracking-[0.1em] font-semibold">
+              Inspector
+            </span>
+            <button
+              type="button"
+              aria-label="Close studio inspector"
+              onClick={() => setRightDrawerOpen(false)}
+              className="w-7 h-7 rounded-md border border-[#1a1a1a]/15 flex items-center justify-center text-[#1a1a1a] cursor-pointer"
+            >
+              <X className="w-4 h-4" aria-hidden="true" />
+            </button>
+          </div>
 
-              <section className="flex flex-col">
-                <h3 className="font-mono-tabular text-[0.65rem] uppercase tracking-[0.12em] text-[#1a1a1a]/50 mb-4">
-                  System Status
-                </h3>
-                <p className="text-[0.78rem] leading-[1.65] text-[#1a1a1a]/85">
-                  Rendering{' '}
-                  <span className="font-mono-tabular font-medium text-[#1a1a1a]">
-                    {stats ? stats.triangleCount.toLocaleString() : '266,636'}
-                  </span>{' '}
-                  triangles via PBR pipeline. Skeletal structure verified (
-                  <span className="font-mono-tabular font-medium text-[#1a1a1a]">
-                    {stats ? stats.boneCount : 56} bones
-                  </span>
-                  ).
-                </p>
-                {activeLightingObj && (
-                  <p className="mt-3 text-[0.72rem] leading-[1.55] text-[#1a1a1a]/55">
-                    {activeLightingObj.description}
+          <section className="studio-shell-inspector-body px-5 xl:px-6 py-6 xl:py-7 flex flex-col gap-7">
+            {/* Section: Turntable Inspect */}
+            {activeSection === 'inspect' && (
+              <>
+                {renderLightingControls()}
+
+                <section className="flex flex-col">
+                  <h3 className="font-mono-tabular text-[0.65rem] uppercase tracking-[0.12em] text-[#1a1a1a]/50 mb-3.5">
+                    System Status
+                  </h3>
+                  <p className="text-[0.76rem] leading-[1.6] text-[#1a1a1a]/85">
+                    Rendering{' '}
+                    <span className="font-mono-tabular font-medium text-[#1a1a1a]">
+                      {stats ? stats.triangleCount.toLocaleString() : '34,800'}
+                    </span>{' '}
+                    triangles ({lodLevel},{' '}
+                    <span className="font-mono-tabular font-medium text-[#1a1a1a]">
+                      {stats ? stats.materialSlots : 6} PBR
+                    </span>{' '}
+                    slots). UE5 skeleton verified (
+                    <span className="font-mono-tabular font-medium text-[#1a1a1a]">
+                      {stats ? stats.boneCount : 63} bones
+                    </span>
+                    ).
                   </p>
-                )}
-              </section>
+                  {activeLightingObj && (
+                    <p className="mt-2.5 text-[0.71rem] leading-[1.55] text-[#1a1a1a]/55">
+                      {activeLightingObj.description}
+                    </p>
+                  )}
+                </section>
 
               <section className="flex flex-col pt-5 border-t border-[#1a1a1a]/[0.08] gap-2.5">
                 <div className="flex items-center justify-between">
@@ -1050,7 +1149,34 @@ export default function App() {
                   </button>
                 </div>
 
-                <label className="mt-6 flex flex-col gap-2 text-[0.78rem]">
+                <div className="mt-5 flex flex-col gap-2">
+                  <span className="font-mono-tabular text-[0.65rem] uppercase tracking-[0.12em] text-[#1a1a1a]/50">
+                    Character Mesh LOD
+                  </span>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {(['LOD0', 'LOD1', 'LOD2'] as const).map((level) => {
+                      const active = lodLevel === level;
+                      return (
+                        <button
+                          key={level}
+                          type="button"
+                          aria-pressed={active}
+                          data-testid={`lod-btn-${level}`}
+                          onClick={() => handleLodChange(level)}
+                          className={`py-1.5 text-[0.72rem] font-mono-tabular rounded-[4px] border transition-colors cursor-pointer ${
+                            active
+                              ? 'border-[#1a1a1a] bg-[#1a1a1a] text-white font-semibold'
+                              : 'border-[#1a1a1a]/[0.12] bg-white text-[#1a1a1a] hover:border-[#1a1a1a]/40'
+                          }`}
+                        >
+                          {level}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <label className="mt-5 flex flex-col gap-2 text-[0.78rem]">
                   <div className="flex items-center justify-between">
                     <span className="text-[#1a1a1a]">Playback Speed</span>
                     <span className="font-mono-tabular text-[0.72rem] text-[#1a1a1a]/60">
@@ -1072,51 +1198,53 @@ export default function App() {
               {renderLightingControls()}
             </>
           )}
-        </section>
+          </section>
+
+          {/* Sticky Bottom Export Actions (Character + Modular UE5 Gun .GLB) */}
+          <div className="export-footer flex flex-col gap-2 px-5 xl:px-6 py-3.5 border-t border-[#1a1a1a]/[0.08] bg-[#f8f7f4]">
+            <button
+              type="button"
+              data-testid="export-weapon-glb-btn"
+              onClick={handleExportWeaponGLB}
+              disabled={isExportingWeapon || !activeWeaponSpec}
+              className="w-full bg-[#1a1a1a] hover:bg-[#2d2d2d] active:scale-[0.99] disabled:opacity-45 text-white font-semibold text-[0.75rem] py-2 px-3 rounded-lg transition-all duration-150 cursor-pointer whitespace-nowrap truncate flex items-center justify-center gap-2"
+            >
+              <Download className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+              <span className="truncate">
+                {isExportingWeapon
+                  ? 'Exporting Gun .GLB...'
+                  : activeWeaponSpec
+                    ? `Download ${activeWeaponSpec.shortName} .GLB`
+                    : 'Equip Gun to Export .GLB'}
+              </span>
+            </button>
+            <button
+              type="button"
+              data-testid="export-character-glb-btn"
+              onClick={handleExportGLB}
+              disabled={isExporting}
+              className="w-full bg-[#ff4d00] hover:bg-[#e54500] active:scale-[0.99] disabled:opacity-60 text-white font-semibold text-[0.76rem] py-2 px-3 rounded-lg transition-all duration-150 cursor-pointer whitespace-nowrap truncate"
+            >
+              {isExporting ? 'Exporting Character...' : 'Download Character .GLB'}
+            </button>
+          </div>
+        </aside>
       )}
 
-      {/* Bottom-Right Primary Export Actions (Character + Modular UE5 Gun .GLB) */}
+      {/* Bottom-Center Editorial Metadata Footer */}
       {!uiHidden && (
-        <div className="hidden lg:flex flex-col gap-2 col-start-3 col-end-4 row-start-3 row-end-4 px-8 py-4 border-t border-l border-[#1a1a1a]/[0.08] bg-[#f8f7f4]">
-          <button
-            type="button"
-            data-testid="export-weapon-glb-btn"
-            onClick={handleExportWeaponGLB}
-            disabled={isExportingWeapon || !activeWeaponSpec}
-            className="w-full bg-[#1a1a1a] hover:bg-[#2d2d2d] active:scale-[0.99] disabled:opacity-45 text-white font-semibold text-[0.78rem] py-2.5 px-4 rounded-lg transition-all duration-150 cursor-pointer whitespace-nowrap flex items-center justify-center gap-2"
-          >
-            <Download className="w-3.5 h-3.5" aria-hidden="true" />
-            {isExportingWeapon
-              ? 'Exporting Gun .GLB...'
-              : activeWeaponSpec
-                ? `Download ${activeWeaponSpec.shortName} .GLB`
-                : 'Equip Gun to Export .GLB'}
-          </button>
-          <button
-            type="button"
-            onClick={handleExportGLB}
-            disabled={isExporting}
-            className="w-full bg-[#ff4d00] hover:bg-[#e54500] active:scale-[0.99] disabled:opacity-60 text-white font-semibold text-[0.8rem] py-2.5 px-4 rounded-lg transition-all duration-150 cursor-pointer whitespace-nowrap"
-          >
-            {isExporting ? 'Exporting Character...' : 'Download Character .GLB'}
-          </button>
-        </div>
-      )}
-
-      {/* Bottom-Center Editorial Metadata Footer (Plus Compact Mobile Strip) */}
-      {!uiHidden && (
-        <footer className="col-start-1 lg:col-start-2 col-end-2 lg:col-end-3 row-start-3 row-end-4 px-6 lg:px-10 py-4 flex items-center gap-6 lg:gap-9 font-mono-tabular text-[0.62rem] uppercase tracking-[0.06em] text-[#1a1a1a]/50 border-t border-[#1a1a1a]/[0.08] bg-[#f8f7f4]">
+        <footer className="studio-shell-footer px-4 md:px-6 xl:px-8 py-3.5 flex items-center gap-4 md:gap-7 font-mono-tabular text-[0.62rem] uppercase tracking-[0.06em] text-[#1a1a1a]/50 border-t border-[#1a1a1a]/[0.08] bg-[#f8f7f4]">
           <span className="whitespace-nowrap">
             Height: {stats ? `${stats.heightMeters.toFixed(2)}m` : '1.87m'}
           </span>
-          <span className="hidden sm:inline whitespace-nowrap">Mesh: PBR_Tactical</span>
-          <span className="hidden md:inline whitespace-nowrap">Rig: Finger_Humanoid</span>
+          <span className="hidden sm:inline whitespace-nowrap">Mesh: PBR_ORM_6</span>
+          <span className="hidden md:inline whitespace-nowrap">Rig: UE5_IK_63</span>
           <button
             type="button"
             onClick={() => setUiHidden(true)}
             className="ml-auto hover:text-[#1a1a1a] transition-colors cursor-pointer whitespace-nowrap"
           >
-            Press &apos;H&apos; to hide UI overlay
+            Press &apos;H&apos; to hide UI
           </button>
         </footer>
       )}

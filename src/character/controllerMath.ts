@@ -1,3 +1,5 @@
+import type { AimPitchDistribution } from '../types/studioTypes';
+
 export interface InputState {
   forward: boolean;
   backward: boolean;
@@ -8,6 +10,7 @@ export interface InputState {
   aim: boolean;
   jumpPressed: boolean;
   firePressed: boolean;
+  isArmed?: boolean;
 }
 
 export interface ControllerState {
@@ -23,10 +26,99 @@ export interface ControllerState {
   aimPitch: number;
   aimYawOffset: number;
   recoilAmount: number;
-  recoilVelocity: number;
-  activeClip: string;
-  fireCooldown: number;
   muzzleFlashTimer: number;
+  fireCooldown: number;
+  activeClip: string;
+}
+
+export interface StepCombatResult {
+  firedThisStep: boolean;
+  jumpedThisStep: boolean;
+  isSprinting: boolean;
+}
+
+export const ARENA_BOUND_RADIUS = 11.2;
+const GRAVITY = -19.5;
+const JUMP_VELOCITY = 6.2;
+
+export function dampScalar(current: number, target: number, lambda: number, dt: number): number {
+  return current + (target - current) * (1 - Math.exp(-lambda * Math.max(0, dt)));
+}
+
+export function wrapAngle(angle: number): number {
+  let a = angle;
+  while (a > Math.PI) a -= Math.PI * 2;
+  while (a < -Math.PI) a += Math.PI * 2;
+  return a;
+}
+
+export function lerpAngle(current: number, target: number, alpha: number): number {
+  const diff = wrapAngle(target - current);
+  return wrapAngle(current + diff * Math.min(1, Math.max(0, alpha)));
+}
+
+/**
+ * Pure non-accumulating aim-pitch distribution across spine_02, spine_03, neck_01, head.
+ * Clamps cameraPitch to [-0.55, +0.55] rad and distributes [0.25, 0.35, 0.20, 0.20]
+ * around character-local +X relative to the clip pose.
+ */
+export function computeAimPitchDistribution(cameraPitch: number): AimPitchDistribution {
+  const clampedPitch = Math.max(-0.55, Math.min(0.55, cameraPitch));
+  return {
+    clampedPitch,
+    spine_02: clampedPitch * 0.25,
+    spine_03: clampedPitch * 0.35,
+    neck_01: clampedPitch * 0.20,
+    head: clampedPitch * 0.20,
+  };
+}
+
+/**
+ * Pure mouse-wheel weapon step debouncer:
+ * Accumulates deltaY until |acc| >= 40 with a 150ms cooldown,
+ * stepping strictly by Math.sign(delta) (±1 mod slotCount).
+ */
+export class WheelStepDebouncer {
+  private accumulator = 0;
+  private lastStepTimeMs = -Infinity;
+  private readonly threshold: number;
+  private readonly cooldownMs: number;
+
+  constructor(threshold = 40, cooldownMs = 150) {
+    this.threshold = threshold;
+    this.cooldownMs = cooldownMs;
+  }
+
+  public reset(): void {
+    this.accumulator = 0;
+    this.lastStepTimeMs = -Infinity;
+  }
+
+  public consume(deltaY: number, nowMs: number): -1 | 0 | 1 {
+    if (!Number.isFinite(deltaY) || deltaY === 0) return 0;
+
+    if (nowMs - this.lastStepTimeMs < this.cooldownMs) {
+      return 0;
+    }
+
+    if (this.accumulator !== 0 && Math.sign(deltaY) !== Math.sign(this.accumulator)) {
+      this.accumulator = 0;
+    }
+
+    this.accumulator += deltaY;
+    if (Math.abs(this.accumulator) >= this.threshold) {
+      const step = Math.sign(this.accumulator) as -1 | 1;
+      this.accumulator = 0;
+      this.lastStepTimeMs = nowMs;
+      return step;
+    }
+    return 0;
+  }
+}
+
+export function stepWeaponIndex(currentIndex: number, step: -1 | 0 | 1, count = 5): number {
+  if (step === 0 || count <= 0) return currentIndex;
+  return (((currentIndex + step) % count) + count) % count;
 }
 
 export function createInitialControllerState(): ControllerState {
@@ -43,197 +135,145 @@ export function createInitialControllerState(): ControllerState {
     aimPitch: 0,
     aimYawOffset: 0,
     recoilAmount: 0,
-    recoilVelocity: 0,
-    activeClip: 'Idle_Natural',
-    fireCooldown: 0,
     muzzleFlashTimer: 0,
+    fireCooldown: 0,
+    activeClip: 'Idle_Natural',
   };
 }
 
-/** Shortest signed angle difference in [-PI, PI] */
-export function shortestAngleDelta(from: number, to: number): number {
-  let diff = ((to - from + Math.PI) % (Math.PI * 2)) - Math.PI;
-  if (diff < -Math.PI) diff += Math.PI * 2;
-  return diff;
-}
-
-/** Frame-rate independent exponential damping */
-export function dampScalar(current: number, target: number, lambda: number, dt: number): number {
-  return current + (target - current) * (1 - Math.exp(-lambda * dt));
-}
-
-export interface StepResult {
-  firedThisStep: boolean;
-  jumpedThisStep: boolean;
-  clipWeights: Record<string, number>;
-}
-
 /**
- * Pure deterministic Battlegrounds / GTA-5 character locomotion & combat step.
- * Speeds are matched directly to the biomechanical stride lengths of each clip
- * so boots grip the ground without ice-skating.
+ * Steps live Combat Controller locomotion, jump, unarmed fire fallback, and armed A/D combat strafing.
+ * When armed (excluding Sprint) or aiming, characterYaw locks smoothly to cameraYaw so A/D cleanly
+ * drives Strafe_Left / Strafe_Right instead of spinning sideways!
  */
 export function stepCombatController(
   state: ControllerState,
   input: InputState,
   cameraYaw: number,
   cameraPitch: number,
-  dt: number,
-  obstacleResolver?: (x: number, z: number) => { x: number; z: number }
-): StepResult {
-  const clampedDt = Math.min(Math.max(dt, 0.0001), 0.05);
-  let firedThisStep = false;
-  let jumpedThisStep = false;
-
+  dt: number
+): StepCombatResult {
+  const clampedDt = Math.min(Math.max(dt, 0.001), 0.05);
+  state.isCrouching = input.crouch;
   state.isAiming = input.aim;
-  state.isCrouching = input.crouch && !input.sprint;
 
-  // Cooldowns
-  state.fireCooldown = Math.max(0, state.fireCooldown - clampedDt);
-  state.muzzleFlashTimer = Math.max(0, state.muzzleFlashTimer - clampedDt);
+  const isArmed = input.isArmed ?? true;
 
-  // Recoil spring physics (stiff punchy kick with crisp damped recovery)
-  const springForce = -240 * state.recoilAmount - 22 * state.recoilVelocity;
-  state.recoilVelocity += springForce * clampedDt;
-  state.recoilAmount = Math.max(0, state.recoilAmount + state.recoilVelocity * clampedDt);
+  const moveForward = (input.forward ? 1 : 0) - (input.backward ? 1 : 0);
+  const moveRight = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+  const hasMove = moveForward !== 0 || moveRight !== 0;
 
-  // Firing trigger
-  if (input.firePressed && state.fireCooldown <= 0) {
-    firedThisStep = true;
-    state.fireCooldown = 0.24;
-    state.muzzleFlashTimer = 0.07;
-    state.recoilVelocity += 11.5;
-    state.recoilAmount = Math.min(1.0, state.recoilAmount + 0.35);
-  }
-
-  // Compute desired movement vector in world XZ relative to cameraYaw
-  const moveZ = (input.forward ? 1 : 0) - (input.backward ? 1 : 0);
-  const moveX = (input.right ? 1 : 0) - (input.left ? 1 : 0);
-  const hasMove = moveZ !== 0 || moveX !== 0;
-
-  // Target speed synced to animation stride lengths (m/s)
-  let maxSpeed = 0;
-  if (hasMove) {
-    if (state.isCrouching) {
-      maxSpeed = 1.35;
-    } else if (state.isAiming) {
-      maxSpeed = 1.65;
-    } else if (input.sprint && moveZ >= 0) {
-      maxSpeed = 5.4;
-    } else {
-      maxSpeed = 2.95; // Tactical jog default on WASD, smoothly blending through walk
-    }
-  }
-
-  state.speed = dampScalar(state.speed, maxSpeed, hasMove ? 9.5 : 11.0, clampedDt);
-
-  // Camera forward on XZ: (-sin(camYaw), -cos(camYaw)) when camera orbits behind +Z
-  // Here camera looks along (sin(cameraYaw), cos(cameraYaw)) so character forward = +Z when cameraYaw = 0
   const fwdX = Math.sin(cameraYaw);
   const fwdZ = Math.cos(cameraYaw);
   const rightX = -Math.cos(cameraYaw);
   const rightZ = Math.sin(cameraYaw);
 
-  let worldDirX = fwdX * moveZ + rightX * moveX;
-  let worldDirZ = fwdZ * moveZ + rightZ * moveX;
-  const dirLen = Math.hypot(worldDirX, worldDirZ);
-  if (dirLen > 1e-5) {
-    worldDirX /= dirLen;
-    worldDirZ /= dirLen;
+  let dirX = fwdX * moveForward + rightX * moveRight;
+  let dirZ = fwdZ * moveForward + rightZ * moveRight;
+  const len = Math.hypot(dirX, dirZ);
+  if (len > 1e-5) {
+    dirX /= len;
+    dirZ /= len;
   }
 
-  // Character yaw orientation:
-  // When aiming or firing, upper/full body squares toward camera forward;
-  // otherwise turn smoothly toward movement direction (GTA-5 feel).
-  if (state.isAiming || state.recoilAmount > 0.08) {
-    const delta = shortestAngleDelta(state.yaw, cameraYaw);
-    state.yaw += delta * (1 - Math.exp(-16 * clampedDt));
-  } else if (hasMove && dirLen > 1e-5) {
-    const targetYaw = Math.atan2(worldDirX, worldDirZ);
-    const delta = shortestAngleDelta(state.yaw, targetYaw);
-    state.yaw += delta * (1 - Math.exp(-11 * clampedDt));
-  }
+  const isSprinting = hasMove && input.sprint && !input.crouch && !input.aim;
 
-  // Clamp upper-body aim pitch & yaw offset for spine/head tracking
-  const clampedPitch = Math.max(-0.52, Math.min(0.52, cameraPitch));
-  state.aimPitch = dampScalar(state.aimPitch, state.isAiming ? clampedPitch : 0, 14, clampedDt);
-  state.aimYawOffset = dampScalar(
-    state.aimYawOffset,
-    state.isAiming ? Math.max(-0.6, Math.min(0.6, shortestAngleDelta(state.yaw, cameraYaw))) : 0,
-    14,
-    clampedDt
-  );
-
-  // Move character within military training ground clearing with clean obstacle collision
-  if (state.speed > 0.02 && dirLen > 1e-5) {
-    state.posX += worldDirX * state.speed * clampedDt;
-    state.posZ += worldDirZ * state.speed * clampedDt;
-    if (obstacleResolver) {
-      const resolved = obstacleResolver(state.posX, state.posZ);
-      state.posX = resolved.x;
-      state.posZ = resolved.z;
+  let targetSpeed = 0;
+  if (hasMove) {
+    if (input.aim) {
+      targetSpeed = 1.65;
+    } else if (input.crouch) {
+      targetSpeed = 1.75;
+    } else if (isSprinting) {
+      targetSpeed = 5.4;
     } else {
-      const dist = Math.hypot(state.posX, state.posZ);
-      const maxRadius = 7.0;
-      if (dist > maxRadius) {
-        state.posX = (state.posX / dist) * maxRadius;
-        state.posZ = (state.posZ / dist) * maxRadius;
-      }
+      targetSpeed = 2.85;
     }
   }
 
-  // Jump arc physics
-  if (input.jumpPressed && state.isGrounded) {
+  state.speed = dampScalar(state.speed, targetSpeed, hasMove ? 11.5 : 13.0, clampedDt);
+  if (!hasMove && state.speed < 0.03) state.speed = 0;
+
+  state.posX += dirX * state.speed * clampedDt;
+  state.posZ += dirZ * state.speed * clampedDt;
+
+  const distFromCenter = Math.hypot(state.posX, state.posZ);
+  if (distFromCenter > ARENA_BOUND_RADIUS) {
+    const scale = ARENA_BOUND_RADIUS / distFromCenter;
+    state.posX *= scale;
+    state.posZ *= scale;
+  }
+
+  // Lock characterYaw to cameraYaw when armed (excluding Sprint) or aiming -> crisp A/D combat strafing!
+  if (input.aim || (isArmed && !isSprinting)) {
+    state.yaw = lerpAngle(state.yaw, cameraYaw, 18.0 * clampedDt);
+  } else if (hasMove) {
+    const moveYaw = Math.atan2(dirX, dirZ);
+    state.yaw = lerpAngle(state.yaw, moveYaw, 10.5 * clampedDt);
+  }
+
+  // Clamped aim pitch & yaw offset for upper-body spine/neck/head tracking
+  state.aimPitch = Math.max(-0.55, Math.min(0.55, cameraPitch));
+  state.aimYawOffset = Math.max(-0.35, Math.min(0.35, wrapAngle(cameraYaw - state.yaw)));
+
+  // Jump & gravity
+  let jumpedThisStep = false;
+  if (input.jumpPressed && state.isGrounded && !input.crouch) {
+    state.velY = JUMP_VELOCITY;
     state.isGrounded = false;
-    state.velY = 4.65;
     jumpedThisStep = true;
   }
 
   if (!state.isGrounded) {
-    state.velY -= 12.8 * clampedDt;
+    state.velY += GRAVITY * clampedDt;
     state.posY += state.velY * clampedDt;
     if (state.posY <= 0) {
       state.posY = 0;
       state.velY = 0;
       state.isGrounded = true;
     }
-  }
-
-  // Select primary animation clip & blend weights
-  let clip = 'Idle_Natural';
-  if (!state.isGrounded) {
-    clip = 'Jump_Action';
-  } else if (state.muzzleFlashTimer > 0 || state.recoilAmount > 0.22) {
-    clip = 'Combat_Fire_Burst';
-  } else if (state.isAiming) {
-    if (hasMove && Math.abs(moveX) > Math.abs(moveZ)) {
-      clip = moveX < 0 ? 'Strafe_Left' : 'Strafe_Right';
-    } else if (state.speed > 0.35) {
-      clip = 'Walk_Casual_GTA';
-    } else {
-      clip = 'Combat_Aim_Stance';
-    }
-  } else if (state.isCrouching) {
-    clip = state.speed > 0.25 ? 'Crouch_Walk' : 'Crouch_Idle';
-  } else if (state.speed > 4.1) {
-    clip = 'Sprint_Combat';
-  } else if (state.speed > 2.05) {
-    clip = 'Jog_Tactical';
-  } else if (state.speed > 0.22) {
-    clip = 'Walk_Casual_GTA';
   } else {
-    clip = 'Idle_Natural';
+    state.posY = 0;
+    state.velY = 0;
   }
 
-  state.activeClip = clip;
+  // Unarmed burst fire fallback (when weapon is holstered)
+  state.fireCooldown = Math.max(0, state.fireCooldown - clampedDt);
+  state.muzzleFlashTimer = Math.max(0, state.muzzleFlashTimer - clampedDt);
+  state.recoilAmount = dampScalar(state.recoilAmount, 0, 11.0, clampedDt);
 
-  const clipWeights: Record<string, number> = {
-    [clip]: 1.0,
-  };
+  let firedThisStep = false;
+  if (input.firePressed && state.fireCooldown <= 0) {
+    firedThisStep = true;
+    state.fireCooldown = 0.13;
+    state.muzzleFlashTimer = 0.07;
+    state.recoilAmount = Math.min(1.0, state.recoilAmount + 0.45);
+  }
 
-  return {
-    firedThisStep,
-    jumpedThisStep,
-    clipWeights,
-  };
+  // Choose base locomotion / combat clip
+  if (!state.isGrounded) {
+    state.activeClip = 'Jump_Action';
+  } else if (firedThisStep || state.muzzleFlashTimer > 0) {
+    state.activeClip = 'Combat_Fire_Burst';
+  } else if (input.crouch) {
+    state.activeClip = hasMove ? 'Crouch_Walk' : 'Crouch_Idle';
+  } else if (isSprinting) {
+    state.activeClip = 'Sprint_Combat';
+  } else if (hasMove && (input.aim || isArmed)) {
+    if (moveRight < 0 && Math.abs(moveRight) >= Math.abs(moveForward)) {
+      state.activeClip = 'Strafe_Left';
+    } else if (moveRight > 0 && Math.abs(moveRight) >= Math.abs(moveForward)) {
+      state.activeClip = 'Strafe_Right';
+    } else {
+      state.activeClip = state.speed > 2.4 && !input.aim ? 'Jog_Tactical' : 'Walk_Casual_GTA';
+    }
+  } else if (input.aim) {
+    state.activeClip = 'Combat_Aim_Stance';
+  } else if (hasMove) {
+    state.activeClip = state.speed > 2.4 ? 'Jog_Tactical' : 'Walk_Casual_GTA';
+  } else {
+    state.activeClip = 'Idle_Natural';
+  }
+
+  return { firedThisStep, jumpedThisStep, isSprinting };
 }
